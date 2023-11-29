@@ -1,5 +1,9 @@
 version: 2.1
 
+orbs:
+  aws-cli: circleci/aws-cli@4.0
+  aws-s3: circleci/aws-s3@4.0
+
 commands:
   cmd-trufflehog-scan:
     parameters:
@@ -83,7 +87,7 @@ workflows:
   publish:
     jobs:
       - run-trufflehog-scan
-      - publish-resources:
+      - aws-s3/sync:
           name: publish-resources-dev
           context: aws-dev
           requires:
@@ -92,6 +96,17 @@ workflows:
             branches:
               only:
                 - dev
+          from: ./templates/
+          to: s3://${PUBLIC_RESOURCES_BUCKET}
+#      - publish-resources:
+#          name: publish-resources-dev
+#          context: aws-dev
+#          requires:
+#            - run-trufflehog-scan
+#          filters:
+#            branches:
+#              only:
+#                - dev
       - publish-resources:
           name: publish-resources-prod
           context: aws-prod
