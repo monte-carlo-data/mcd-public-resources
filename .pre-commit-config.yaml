@@ -1,0 +1,6 @@
+repos:
+- repo: https://github.com/aws-cloudformation/cfn-lint
+  rev: v0.83.3
+  hooks:
+    - id: cfn-lint
+      files: templates/cloudformation/.*\.(json|yml|yaml)$
