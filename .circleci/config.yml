@@ -1,0 +1,103 @@
+version: 2.1
+
+commands:
+  cmd-trufflehog-scan:
+    parameters:
+      disable_entropy:
+        default: true
+        description: Should we disable truffleHog's entropy detection?
+        type: boolean
+      max_history:
+        default: "1"
+        description: How far back to scan in git revisions
+        type: string
+      regexp_rules:
+        default: ""
+        description: Override default regexp rules with this file.
+        type: string
+      allowlist_file:
+        default: ".circleci/trufflehog_config/allowlist.json"
+        description: Add items to this file to allow you to override specific findings.
+        type: string
+      repo_path:
+        default: .
+        description: Scan alternate local or remote repo
+        type: string
+      current_branch:
+        default: ${CIRCLE_BRANCH}
+        description: Git branch to use
+        type: string
+    steps:
+      - run:
+          command: >
+            trufflehog --regex --json \
+                       --branch << parameters.current_branch >> \
+                       <<# parameters.allowlist_file >> --allow << parameters.allowlist_file >> <</ parameters.allowlist_file >> \
+                       <<# parameters.max_history >> --max_depth=<< parameters.max_history >> <</ parameters.max_history>> \
+                       <<# parameters.disable_entropy >> --entropy=False <</ parameters.disable_entropy >> \
+                       <<# parameters.regexp_rules >> --rules=<< parameters.regexp_rules >> <</ parameters.regexp_rules >> \
+                       << parameters.repo_path >> \
+                       | jq '{"reason":.reason,"path": .path}'
+          name: Scan using truffleHog
+
+jobs:
+  run-trufflehog-scan:
+    docker:
+      - image: cimg/python:3.11
+    parameters:
+      current_branch:
+        default: ${CIRCLE_BRANCH}
+        description: Git branch to use
+        type: string
+    steps:
+      - checkout
+      - run:
+          command: pip install truffleHog
+          name: Install truffleHog
+      - cmd-trufflehog-scan:
+          current_branch: << parameters.current_branch >>
+
+  publish-resources:
+    docker:
+      - image: python:3.11
+
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: |
+            apt-get update -y
+            apt-get install -yq build-essential zip less python3-sphinx
+            pip install virtualenv==20.24.7
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            ./aws/install
+            aws --version
+      - run:
+          name: Publish templates and resources
+          command: aws s3 sync ./templates/ s3://${PUBLIC_RESOURCES_BUCKET}
+
+workflows:
+  version: 2
+
+  publish:
+    jobs:
+      - run-trufflehog-scan
+      - publish-resources:
+          name: publish-resources-dev
+          context: aws-dev
+          requires:
+            - run-trufflehog-scan
+          filters:
+            branches:
+              only:
+                - dev
+      - publish-resources:
+          name: publish-resources-prod
+          context: aws-prod
+          requires:
+            - run-trufflehog-scan
+          filters:
+            branches:
+              only:
+                - main
