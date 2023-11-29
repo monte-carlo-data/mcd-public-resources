@@ -3,7 +3,7 @@
 # generated role via the health endpoint (dev). Requires setting a profile, region, and specifying a standard agent stack.
 
 region='us-east-1'
-profile_name='<PROFILE'
+profile_name='<PROFILE>'
 stack_arn='<STACK_ARN>'
 
 stack_outputs=$(aws cloudformation describe-stacks --stack-name $stack_arn --profile $profile_name --query 'Stacks[].Outputs[*]')
