@@ -195,7 +195,7 @@ Resources:
           MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
           MCD_AGENT_WRAPPER_VERSION: 0.1.0
           MCD_STACK_ID: !Ref 'AWS::StackId'
-          MCD_LOG_GROUP_ID: !GetAtt LogGroup.Arn
+          MCD_LOG_GROUP_ID: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda"
       FunctionName: !Sub '${AWS::StackName}-AgentLambda'
       MemorySize: !Ref MemorySize
       ReservedConcurrentExecutions: !Ref ConcurrentExecutions
@@ -266,7 +266,7 @@ Resources:
                   - logs:FilterLogEvents
                 Effect: Allow
                 Resource:
-                  - !GetAtt LogGroup.Arn
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda:*"
           PolicyName: LogsPolicy
         - !If
           - ShouldCreateUpdatePolicy
