@@ -20,6 +20,44 @@ on AWS.
 For any developers of the agent [this](examples/agent/test_execution.sh) simple script can be handy in testing basic
 execution of the agent.
 
+#### Basic VPC ([Source](templates/cloudformation/basic_vpc.yaml))
+
+This template creates a VPC with 2 public and private subnets. Includes a NAT, IGW, and S3 VPCE.
+Can be used to connect an Agent to a VPC for peering and/or IP whitelisting.
+
+The following example demonstrates how you can deploy an agent with this connected VPC in one stack:
+
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Example template that deploys an agent with a connected VPC by leveraging nested stacks.
+Outputs:
+  FunctionArn:
+    Description: Agent Function ARN. To be used in registering.
+    Value: !GetAtt Agent.Outputs.FunctionArn
+  InvocationRoleArn:
+    Description: Assumable role ARN. To be used in registering.
+    Value: !GetAtt Agent.Outputs.InvocationRoleArn
+  InvocationRoleExternalId:
+    Description: Assumable role External ID. To be used in registering.
+    Value: !GetAtt Agent.Outputs.InvocationRoleExternalId
+  PublicIP:
+    Description: IP address from which agent resources access the Internet (e.g. for IP whitelisting).
+    Value: !GetAtt Networking.Outputs.PublicIP
+Resources:
+  Networking:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/basic_vpc.yaml
+  Agent:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
+      Parameters:
+        CloudAccountId: 190812797848
+        ExistingVpcId: !GetAtt Networking.Outputs.VpcId
+        ExistingSubnetIds: !Join [ ',', [ !GetAtt Networking.Outputs.PrivateSubnetAz1, !GetAtt Networking.Outputs.PrivateSubnetAz2 ] ]
+```
+
 ### Terraform
 
 Coming soon!
@@ -35,11 +73,11 @@ Coming soon!
     pip install -r requirements-dev.txt; pre-commit install
     ```
    This hook will lint all templates in the `templates/` directory
-   using [cfn-lint](https://github.com/aws-cloudformation/cfn-lint).
+   using [cfn-lint](https://github.com/aws-cloudformation/cfn-lint). CircleCI will also validate templates.
 
 Then any IaC templates can be created using commands
 like [deploy](https://awscli.amazonaws.com/v2/documentation/api/latest/reference/cloudformation/deploy/index.html) or
-the Console.
+the console.
 
 After merging to `dev` CircleCI will publish any templates or resources in the `templates/` directory
 to `s3://mcd-dev-public-resources`.
@@ -53,7 +91,7 @@ Coming soon!
 ## Releases
 
 After merging to `main` CircleCI will publish any templates or resources in the `templates/` directory
-to `s3://mcd-public-resources` (requires review and approval).
+to `s3://mcd-public-resources` (requires review, validation, and approval).
 
 ## Additional Resources
 
