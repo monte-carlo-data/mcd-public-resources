@@ -61,26 +61,6 @@ jobs:
       - cmd-trufflehog-scan:
           current_branch: << parameters.current_branch >>
 
-  publish-resources:
-    docker:
-      - image: python:3.11
-
-    steps:
-      - checkout
-      - run:
-          name: Install dependencies
-          command: |
-            apt-get update -y
-            apt-get install -yq build-essential zip less python3-sphinx
-            pip install virtualenv==20.24.7
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip awscliv2.zip
-            ./aws/install
-            aws --version
-      - run:
-          name: Publish templates and resources
-          command: aws s3 sync ./templates/ s3://${PUBLIC_RESOURCES_BUCKET}
-
 workflows:
   version: 2
 
@@ -103,17 +83,13 @@ workflows:
                 - dev
           from: ./templates/
           to: s3://${PUBLIC_RESOURCES_BUCKET}
-#      - publish-resources:
-#          name: publish-resources-dev
-#          context: aws-dev
-#          requires:
-#            - run-trufflehog-scan
-#          filters:
-#            branches:
-#              only:
-#                - dev
-      - publish-resources:
+      - aws-s3/sync:
           name: publish-resources-prod
+          auth:
+            - aws-cli/setup:
+                aws_access_key_id: AWS_ACCESS_KEY_ID
+                aws_secret_access_key: AWS_SECRET_ACCESS_KEY
+                region: AWS_REGION
           context: aws-prod
           requires:
             - run-trufflehog-scan
@@ -121,3 +97,5 @@ workflows:
             branches:
               only:
                 - main
+          from: ./templates/
+          to: s3://${PUBLIC_RESOURCES_BUCKET}
