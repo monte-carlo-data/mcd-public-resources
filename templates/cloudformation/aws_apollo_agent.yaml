@@ -1,0 +1,412 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Monte Carlo's containerized agent (Beta). See details here: https://docs.getmontecarlo.com/docs/platform-architecture
+Metadata:
+  License: >
+    Copyright 2023 Monte Carlo Data, Inc.
+
+    The Software contained herein (the “Software”) is the intellectual property of Monte Carlo Data, Inc. (“Licensor”),
+    and Licensor retains all intellectual property rights in the Software, including any and all derivatives, changes and
+    improvements thereto. Only customers who have entered into a commercial agreement with Licensor for use or
+    purchase of the Software (“Licensee”) are licensed or otherwise authorized to use the Software, and any Licensee
+    agrees that it obtains no copyright or other intellectual property rights to the Software, except for the license
+    expressly granted below or in accordance with the terms of their commercial agreement with Licensor (the
+    “Agreement”). Subject to the terms and conditions of the Agreement, Licensor grants Licensee a non-exclusive,
+    non-transferable, non-sublicensable, revocable, limited right and license to use the Software, in each case solely
+    internally within Licensee’s organization for non-commercial purposes and only in connection with the service
+    provided by Licensor pursuant to the Agreement, and in object code form only. Without Licensor’s express prior
+    written consent, Licensee may not, directly or indirectly, (i) distribute the Software, any portion thereof, or any
+    modifications, enhancements, or derivative works of any of the foregoing (collectively, the “Derivatives”) to any
+    third party, (ii) license, market, sell, offer for sale or otherwise attempt to commercialize any Software, Derivatives,
+    or portions thereof, (iii) use the Software, Derivatives, or any portion thereof for the benefit of any third party, (iv)
+    use the Software, Derivatives, or any portion thereof in any manner or with respect to any commercial activity
+    which competes, or is reasonably likely to compete, with any business that Licensor conducts, proposes to conduct
+    or demonstrably anticipates conducting, at any time; or (v) seek any patent or other intellectual property rights or
+    protections over or in connection with any Software of Derivatives.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Connectivity Configuration
+        Parameters:
+          - CloudAccountId
+          - ExistingVpcId
+          - ExistingSubnetIds
+      - Label:
+          default: Advanced Configuration
+        Parameters:
+          - EnableRemoteUpdates
+          - ImageUri
+          - MemorySize
+          - ConcurrentExecutions
+    ParameterLabels:
+      CloudAccountId:
+        default: Select a Monte Carlo AWS Account ID
+      ConcurrentExecutions:
+        default: Set agent concurrency
+      EnableRemoteUpdates:
+        default: Enable remote code updates
+      ExistingSubnetIds:
+        default: Select VPC private subnets
+      ExistingVpcId:
+        default: Connect to a VPC
+      ImageUri:
+        default: Select the agent image source
+      MemorySize:
+        default: Set agent memory
+Parameters:
+  CloudAccountId:
+    Description: >
+      Select the Monte Carlo account your collection service is hosted in. This can be found in the 
+      'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
+    Type: String
+    Default: 190812797848
+    AllowedValues: [ 190812797848, 799135046351, 682816785079 ]
+  ConcurrentExecutions:
+    Default: 20
+    Description: The number of concurrent lambda executions for the agent.
+    MaxValue: 200
+    MinValue: 0
+    Type: Number
+  EnableRemoteUpdates:
+    AllowedValues:
+      - True
+      - False
+    Default: True
+    Description: Select True if you want to allow Monte Carlo to be able to update your agent remotely.
+    Type: String
+  ExistingSubnetIds:
+    Default: N/A
+    Description: >
+      Optionally specify a comma-delimited list of private subnet IDs (at least 2). Required if connecting to a VPC.
+    Type: CommaDelimitedList
+  ExistingVpcId:
+    AllowedPattern: '^(vpc[e]?-[0-9a-f]*)$|N/A'
+    Default: N/A
+    Description: Optionally specify a VPC ID to deploy the agent into.
+    Type: String
+  ImageUri:
+    Default: 682816785079.dkr.ecr.*.amazonaws.com/dev-agent:68  # TODO - Replace with new repo (when ready)
+    Description: >
+      URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
+      is deployed in.
+    Type: String
+  MemorySize:
+    Default: 512
+    Description: >
+      The amount of memory (MB) available to the agent at runtime; this value can be any multiple of 
+      1 MB greater than 256MB.
+    MinValue: 256
+    MaxValue: 10240
+    Type: Number
+Outputs:
+  FunctionArn:
+    Description: Agent Function ARN. To be used in registering.
+    Value: !GetAtt Function.Arn
+  InvocationRoleArn:
+    Description: Assumable role ARN. To be used in registering.
+    Value: !GetAtt InvocationRole.Arn
+  InvocationRoleExternalId:
+    Description: Assumable role External ID. To be used in registering.
+    Value: !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ]
+  SecurityGroupId:
+    Condition: ShouldConnectVPC
+    Description: Security group ID.
+    Value: !Ref SecurityGroup
+  StorageArn:
+    Description: Storage bucket ARN.
+    Value: !GetAtt Storage.Arn
+Conditions:
+  ShouldCreateUpdatePolicy: !Equals
+    - !Ref EnableRemoteUpdates
+    - True
+  ShouldConnectVPC: !And
+    - !Not [ !Equals [ !Ref ExistingVpcId, 'N/A' ] ]
+    - !Not [ !Equals [ !Join [ '', !Ref ExistingSubnetIds ], 'N/A' ] ]
+    - !Not [ !Equals [ !Ref ExistingVpcId, '' ] ]
+    - !Not [ !Equals [ !Join [ '', !Ref ExistingSubnetIds ], '' ] ]
+Resources:
+  Storage:
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 90
+            Prefix: 'mcd/'
+            Status: Enabled
+          - ExpirationInDays: 2
+            Prefix: 'mcd/responses/'
+            Status: Enabled
+    Type: AWS::S3::Bucket
+  StorageSSLPolicy:
+    Properties:
+      Bucket: !Ref Storage
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyActionsWithoutSSL
+            Effect: Deny
+            Principal:
+              AWS: '*'
+            Action:
+              - '*'
+            Resource:
+              - !GetAtt Storage.Arn
+              - !Sub '${Storage.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport:
+                  - false
+    Type: AWS::S3::BucketPolicy
+  LogGroup:
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-AgentLambda'
+      RetentionInDays: 14
+    Type: AWS::Logs::LogGroup
+  Function:
+    Properties:
+      Code:
+        ImageUri: !Join
+          - ''
+          - - !Select [ 0, !Split [ '*', !Ref ImageUri ] ]
+            - !Ref 'AWS::Region'
+            - !Select [ 1, !Split [ '*', !Ref ImageUri ] ]
+      ImageConfig:
+        Command:
+          - apollo.interfaces.lambda_function.handler.lambda_handler
+      PackageType: Image
+      Environment:
+        Variables:
+          MCD_AGENT_IMAGE_TAG: !Join
+            - ''
+            - - !Select [ 0, !Split [ '*', !Ref ImageUri ] ]
+              - !Ref 'AWS::Region'
+              - !Select [ 1, !Split [ '*', !Ref ImageUri ] ]
+          MCD_AGENT_CLOUD_PLATFORM: AWS
+          MCD_STORAGE_BUCKET_NAME: !Ref Storage
+          MCD_AGENT_IS_REMOTE_UPGRADABLE: !If [ ShouldCreateUpdatePolicy, True, False ]
+          MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
+          MCD_AGENT_WRAPPER_VERSION: 0.1.0
+          MCD_STACK_ID: !Ref 'AWS::StackId'
+          MCD_LOG_GROUP_ID: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda"
+      FunctionName: !Sub '${AWS::StackName}-AgentLambda'
+      MemorySize: !Ref MemorySize
+      ReservedConcurrentExecutions: !Ref ConcurrentExecutions
+      Role: !GetAtt ExecutionRole.Arn
+      Tags:
+        - Key: Name
+          Value: monte-carlo-agent
+      Timeout: 900
+      VpcConfig: !If
+        - ShouldConnectVPC
+        - SecurityGroupIds:
+            - !Ref SecurityGroup
+          SubnetIds: !Ref ExistingSubnetIds
+        - !Ref AWS::NoValue
+    Type: AWS::Lambda::Function
+  ExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - !If
+          - ShouldConnectVPC
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketPolicyStatus
+                  - s3:GetBucketAcl
+                Effect: Allow
+                Resource:
+                  - !Sub 'arn:aws:s3:::${Storage}'
+                  - !Sub 'arn:aws:s3:::${Storage}/*'
+          PolicyName: S3Policy
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                Effect: Allow
+                Resource:
+                  - !Ref 'AWS::StackId'
+          PolicyName: StackReadPolicy
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - "logs:Describe*"
+                  - "logs:Get*"
+                  - "logs:List*"
+                  - logs:StartQuery
+                  - logs:StopQuery
+                  - logs:FilterLogEvents
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda:*"
+          PolicyName: LogsPolicy
+        - !If
+          - ShouldCreateUpdatePolicy
+          - PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Action:
+                    - cloudformation:UpdateStack
+                    - cloudformation:UpdateStackInstances
+                  Effect: Allow
+                  Resource:
+                    - !Ref 'AWS::StackId'
+            PolicyName: StackUpdatePolicy
+          - !Ref AWS::NoValue
+        - !If
+          - ShouldCreateUpdatePolicy
+          - PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Action:
+                    - iam:GetRole
+                    - iam:PassRole
+                  Condition:
+                    ForAllValues:StringEquals:
+                      iam:ResourceTag/RoleSource: monte-carlo-agent
+                  Effect: Allow
+                  Resource:
+                    - '*'
+            PolicyName: RolePolicy
+          - !Ref AWS::NoValue
+        - !If
+          - ShouldCreateUpdatePolicy
+          - PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Action:
+                    - lambda:CreateFunction
+                    - lambda:UpdateFunctionCode
+                    - lambda:TagResource
+                    - lambda:UntagResource
+                    - lambda:GetFunctionConfiguration
+                    - lambda:ListTags
+                    - lambda:GetFunction
+                    - lambda:UpdateFunctionConfiguration
+                    - lambda:DeleteFunction
+                    - lambda:DeleteFunctionConcurrency
+                    - lambda:PutFunctionConcurrency
+                  Effect: Allow
+                  Resource:
+                    - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*'
+            PolicyName: LambdaUpdatePolicy
+          - !Ref AWS::NoValue
+        - !If
+          - ShouldCreateUpdatePolicy
+          - PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Action:
+                    - ecr:BatchGetImage
+                    - ecr:GetDownloadUrlForLayer
+                  Effect: Allow
+                  Resource:
+                    - !Join
+                      - ':'
+                      - - !Sub 'arn:aws:ecr:${AWS::Region}'
+                        - !Select [ 0, !Split [ '.', !Ref ImageUri ] ]
+                        - 'repository/*'
+            PolicyName: RepoAccessPolicy
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: RoleSource
+          Value: monte-carlo-agent
+    Type: AWS::IAM::Role
+  InvocationRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${CloudAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ]
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt Function.Arn
+                Effect: Allow
+          PolicyName: InvokePolicy
+      Tags:
+        - Key: MonteCarloData
+          Value: ''
+    Type: AWS::IAM::Role
+  SecurityGroup:
+    Condition: ShouldConnectVPC
+    Properties:
+      GroupDescription: Agent SG
+      SecurityGroupEgress:
+        - CidrIp: '0.0.0.0/0'
+          IpProtocol: '-1'
+      SecurityGroupIngress: [ ]
+      VpcId: !Ref ExistingVpcId
+    Type: AWS::EC2::SecurityGroup
+  SecurityGroupIngress:
+    Condition: ShouldConnectVPC
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref SecurityGroup
+    Type: AWS::EC2::SecurityGroupIngress
+Rules:
+  requireSubnet:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::EachMemberEquals:
+                - Ref: ExistingSubnetIds
+                - N/A
+        AssertDescription: Subnet IDs are required when using existing VPC
+    RuleCondition:
+      Fn::Not:
+        - Fn::Equals:
+            - Ref: ExistingVpcId
+            - N/A
+  requireVpc:
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: ExistingVpcId
+                - N/A
+        AssertDescription: VPC ID is required when using existing VPC
+    RuleCondition:
+      Fn::Not:
+        - Fn::EachMemberEquals:
+            - Ref: ExistingSubnetIds
+            - N/A
