@@ -85,7 +85,7 @@ Parameters:
     Description: Optionally specify a VPC ID to deploy the agent into.
     Type: String
   ImageUri:
-    Default: 682816785079.dkr.ecr.*.amazonaws.com/dev-agent:68  # TODO - Replace with new repo (when ready)
+    Default: 752656882040.dkr.ecr.*.amazonaws.com/mcd-agent:latest
     Description: >
       URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
       is deployed in.
