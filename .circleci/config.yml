@@ -56,10 +56,23 @@ jobs:
     steps:
       - checkout
       - run:
+          name: Install dependencies
           command: pip install truffleHog
-          name: Install truffleHog
       - cmd-trufflehog-scan:
           current_branch: << parameters.current_branch >>
+
+  cloudformation-lint:
+    docker:
+      - image: cimg/python:3.11
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install cfn-lint
+      - run:
+          name: Validate templates
+          command: cfn-lint templates/cloudformation/*
+
 
 workflows:
   version: 2
@@ -67,6 +80,7 @@ workflows:
   publish:
     jobs:
       - run-trufflehog-scan
+      - cloudformation-lint
       - aws-s3/sync:
           name: publish-resources-dev
           auth:
@@ -77,6 +91,7 @@ workflows:
           context: aws-dev
           requires:
             - run-trufflehog-scan
+            - cloudformation-lint
           filters:
             branches:
               only:
@@ -93,6 +108,7 @@ workflows:
           context: aws-prod
           requires:
             - run-trufflehog-scan
+            - cloudformation-lint
           filters:
             branches:
               only:
