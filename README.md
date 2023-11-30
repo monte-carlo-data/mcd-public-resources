@@ -30,6 +30,34 @@ The following example demonstrates how you can deploy an agent with this connect
 ```yaml
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Example template that deploys an agent with a connected VPC by leveraging nested stacks.
+Parameters:
+  CloudAccountId:
+    Description: >
+      Select the Monte Carlo account your collection service is hosted in. This can be found in the 
+      'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
+    Type: String
+    Default: 190812797848
+    AllowedValues: [ 190812797848, 799135046351, 682816785079 ]
+  ConcurrentExecutions:
+    Default: 20
+    Description: The number of concurrent lambda executions for the agent.
+    MaxValue: 200
+    MinValue: 0
+    Type: Number
+  ImageUri:
+    Default: 752656882040.dkr.ecr.*.amazonaws.com/mcd-agent:latest
+    Description: >
+      URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
+      is deployed in.
+    Type: String
+  MemorySize:
+    Default: 512
+    Description: >
+      The amount of memory (MB) available to the agent at runtime; this value can be any multiple of 
+      1 MB greater than 256MB.
+    MinValue: 256
+    MaxValue: 10240
+    Type: Number
 Outputs:
   FunctionArn:
     Description: Agent Function ARN. To be used in registering.
@@ -53,9 +81,12 @@ Resources:
     Properties:
       TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
       Parameters:
-        CloudAccountId: 190812797848
+        CloudAccountId: !Ref CloudAccountId
+        ConcurrentExecutions: !Ref ConcurrentExecutions
         ExistingVpcId: !GetAtt Networking.Outputs.VpcId
         ExistingSubnetIds: !Join [ ',', [ !GetAtt Networking.Outputs.PrivateSubnetAz1, !GetAtt Networking.Outputs.PrivateSubnetAz2 ] ]
+        ImageUri: !Ref ImageUri
+        MemorySize: !Ref MemorySize
 ```
 
 ### Terraform
