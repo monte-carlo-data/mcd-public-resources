@@ -262,7 +262,6 @@ Resources:
                   - "logs:Get*"
                   - "logs:List*"
                   - logs:StartQuery
-                  - logs:StopQuery
                   - logs:FilterLogEvents
                 Effect: Allow
                 Resource:
