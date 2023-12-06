@@ -268,6 +268,15 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda:*"
           PolicyName: LogsPolicy
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:StopQuery
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+          PolicyName: LogsStopQueryPolicy
         - !If
           - ShouldCreateUpdatePolicy
           - PolicyDocument:
