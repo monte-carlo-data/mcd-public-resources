@@ -196,6 +196,7 @@ Resources:
           MCD_AGENT_WRAPPER_VERSION: 0.1.0
           MCD_STACK_ID: !Ref 'AWS::StackId'
           MCD_LOG_GROUP_ID: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda"
+          MCD_AGENT_CONNECTED_TO_A_VPC: !If [ ShouldConnectVPC, True, False ]
       FunctionName: !Sub '${AWS::StackName}-AgentLambda'
       MemorySize: !Ref MemorySize
       ReservedConcurrentExecutions: !Ref ConcurrentExecutions
@@ -276,6 +277,17 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
           PolicyName: LogsStopQueryPolicy
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:ListTags
+                  - lambda:GetFunction
+                Effect: Allow
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*'
+          PolicyName: LambdaInfoPolicy
         - !If
           - ShouldCreateUpdatePolicy
           - PolicyDocument:
@@ -315,9 +327,6 @@ Resources:
                     - lambda:UpdateFunctionCode
                     - lambda:TagResource
                     - lambda:UntagResource
-                    - lambda:GetFunctionConfiguration
-                    - lambda:ListTags
-                    - lambda:GetFunction
                     - lambda:UpdateFunctionConfiguration
                     - lambda:DeleteFunction
                     - lambda:DeleteFunctionConcurrency
