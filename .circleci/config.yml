@@ -79,9 +79,6 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install dependencies
-          command: apk add --update make
-      - run:
           name: Format and validate
           command: |
             cd templates/terraform
