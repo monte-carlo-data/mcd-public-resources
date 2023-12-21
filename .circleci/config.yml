@@ -83,7 +83,7 @@ jobs:
           command: apk add --update make
       - run:
           name: Format and validate
-          command: >
+          command: |
             cd templates/terraform
             terraform init -backend=false
             terraform fmt -recursive -check -diff
