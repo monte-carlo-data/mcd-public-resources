@@ -73,6 +73,18 @@ jobs:
           name: Validate templates
           command: cfn-lint templates/cloudformation/*
 
+  terraform-lint:
+    docker:
+      - image: docker.mirror.hashicorp.services/hashicorp/terraform:light
+    steps:
+      - checkout
+      - run:
+          name: Format and validate
+          command: |
+            cd templates/terraform
+            terraform init -backend=false
+            terraform fmt -recursive -check -diff
+            terraform validate
 
 workflows:
   version: 2
@@ -81,6 +93,7 @@ workflows:
     jobs:
       - run-trufflehog-scan
       - cloudformation-lint
+      - terraform-lint
       - aws-s3/sync:
           name: publish-resources-dev
           auth:
@@ -92,6 +105,7 @@ workflows:
           requires:
             - run-trufflehog-scan
             - cloudformation-lint
+            - terraform-lint
           filters:
             branches:
               only:
@@ -109,6 +123,7 @@ workflows:
           requires:
             - run-trufflehog-scan
             - cloudformation-lint
+            - terraform-lint
           filters:
             branches:
               only:

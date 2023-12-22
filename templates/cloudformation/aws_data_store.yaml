@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Sample template to create a S3 bucket and assumable IAM role for the cloud with customer-hosted object storage 
+  deployment model. Additional details and options can be found here: https://docs.getmontecarlo.com/docs/deployment-and-connecting
+Metadata:
+  License: >
+    Copyright 2023 Monte Carlo Data, Inc.
+
+    The Software contained herein (the “Software”) is the intellectual property of Monte Carlo Data, Inc. (“Licensor”),
+    and Licensor retains all intellectual property rights in the Software, including any and all derivatives, changes and
+    improvements thereto. Only customers who have entered into a commercial agreement with Licensor for use or
+    purchase of the Software (“Licensee”) are licensed or otherwise authorized to use the Software, and any Licensee
+    agrees that it obtains no copyright or other intellectual property rights to the Software, except for the license
+    expressly granted below or in accordance with the terms of their commercial agreement with Licensor (the
+    “Agreement”). Subject to the terms and conditions of the Agreement, Licensor grants Licensee a non-exclusive,
+    non-transferable, non-sublicensable, revocable, limited right and license to use the Software, in each case solely
+    internally within Licensee’s organization for non-commercial purposes and only in connection with the service
+    provided by Licensor pursuant to the Agreement, and in object code form only. Without Licensor’s express prior
+    written consent, Licensee may not, directly or indirectly, (i) distribute the Software, any portion thereof, or any
+    modifications, enhancements, or derivative works of any of the foregoing (collectively, the “Derivatives”) to any
+    third party, (ii) license, market, sell, offer for sale or otherwise attempt to commercialize any Software, Derivatives,
+    or portions thereof, (iii) use the Software, Derivatives, or any portion thereof for the benefit of any third party, (iv)
+    use the Software, Derivatives, or any portion thereof in any manner or with respect to any commercial activity
+    which competes, or is reasonably likely to compete, with any business that Licensor conducts, proposes to conduct
+    or demonstrably anticipates conducting, at any time; or (v) seek any patent or other intellectual property rights or
+    protections over or in connection with any Software of Derivatives.
+  AWS::CloudFormation::Interface:
+    ParameterLabels:
+      MonteCarloCloudAccountId:
+        default: Monte Carlo AWS Account ID
+Parameters:
+  MonteCarloCloudAccountId:
+    Description: >
+      Please select the Monte Carlo account your agent is hosted in. This can be found in the 
+      'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
+    Type: String
+    Default: 190812797848
+    AllowedValues: [ 190812797848, 799135046351 ]
+Resources:
+  ObjectStoreBucket:
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 90
+            Prefix: 'custom-sql-output-samples/'
+            Status: Enabled
+          - ExpirationInDays: 90
+            Prefix: 'rca'
+            Status: Enabled
+          - ExpirationInDays: 90
+            Prefix: 'idempotent/'
+            Status: Enabled
+    Type: AWS::S3::Bucket
+  ObjectStoreRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${MonteCarloCloudAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ]
+      Policies:
+        - PolicyName: 's3-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketPublicAccessBlock'
+                  - 's3:GetBucketPolicyStatus'
+                  - 's3:GetBucketAcl'
+                Resource:
+                  - !GetAtt ObjectStoreBucket.Arn
+                  - !Sub '${ObjectStoreBucket.Arn}/*'
+                Effect: Allow
+      Tags:
+        - Key: MonteCarloData
+          Value: ''
+    Type: AWS::IAM::Role
+Outputs:
+  ObjectStoreBucketName:
+    Description: Name of the S3 bucket. To be used in registering.
+    Value: !Ref ObjectStoreBucket
+  ObjectStoreRoleArn:
+    Description: ARN for the assumable role. To be used in registering.
+    Value: !GetAtt ObjectStoreRole.Arn
+  ObjectStoreRoleExternalId:
+    Description: External ID for the assumable role. To be used in registering.
+    Value: !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ]
