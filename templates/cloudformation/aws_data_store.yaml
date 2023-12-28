@@ -59,6 +59,16 @@ Resources:
           - ExpirationInDays: 90
             Prefix: 'idempotent/'
             Status: Enabled
+      # CORS configuration required for access through pre-signed URLs from the browser
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - 'https://*.getmontecarlo.com'
+            MaxAge: 3000
     Type: AWS::S3::Bucket
   ObjectStoreRole:
     Properties:
