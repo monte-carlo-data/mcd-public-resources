@@ -298,6 +298,18 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-*'
           PolicyName: LambdaInfoPolicy
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - sts:AssumeRole
+                Condition:
+                  StringEquals:
+                    iam:ResourceTag/MonteCarloData: ''
+                Effect: Allow
+                Resource:
+                  - '*'
+          PolicyName: AssumeRolePolicy
         - !If
           - ShouldCreateUpdatePolicy
           - PolicyDocument:
