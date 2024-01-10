@@ -67,6 +67,7 @@ Resources:
             AllowedMethods:
               - GET
             AllowedOrigins:
+              - 'https://getmontecarlo.com'
               - 'https://*.getmontecarlo.com'
             MaxAge: 3000
     Type: AWS::S3::Bucket
