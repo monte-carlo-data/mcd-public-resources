@@ -62,7 +62,7 @@ Parameters:
     Default: 190812797848
     AllowedValues: [ 190812797848, 799135046351, 682816785079 ]
   ConcurrentExecutions:
-    Default: 20
+    Default: 42
     Description: The number of concurrent lambda executions for the agent.
     MaxValue: 200
     MinValue: 0
