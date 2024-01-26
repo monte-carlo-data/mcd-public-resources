@@ -166,11 +166,12 @@ to `s3://mcd-public-resources` (requires review, linting, validation, and approv
 
 ## Additional Resources
 
-| **Description**                                                   | **Link**                                                       |
-|-------------------------------------------------------------------|----------------------------------------------------------------|
-| Monte Carlo's containerized agent                                 | https://github.com/monte-carlo-data/apollo-agent               |
-| Monte Carlo's agent module for customer-hosted deployments in GCP | https://github.com/monte-carlo-data/terraform-google-mcd-agent |
-| Monte Carlo's agent module for customer-hosted deployments in AWS | https://github.com/monte-carlo-data/terraform-aws-mcd-agent    |
+| **Description**                                                     | **Link**                                                        |
+|---------------------------------------------------------------------|-----------------------------------------------------------------|
+| Monte Carlo's containerized agent                                   | https://github.com/monte-carlo-data/apollo-agent                |
+| Monte Carlo's agent module for customer-hosted deployments in GCP   | https://github.com/monte-carlo-data/terraform-google-mcd-agent  |
+| Monte Carlo's agent module for customer-hosted deployments in AWS   | https://github.com/monte-carlo-data/terraform-aws-mcd-agent     |
+| Monte Carlo's agent module for customer-hosted deployments in Azure | https://github.com/monte-carlo-data/terraform-azurerm-mcd-agent |
 
 ## License
 
