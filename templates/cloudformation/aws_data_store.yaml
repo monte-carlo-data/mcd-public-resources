@@ -34,8 +34,8 @@ Parameters:
       Please select the Monte Carlo account your agent is hosted in. This can be found in the 
       'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
     Type: String
-    Default: 190812797848
-    AllowedValues: [ 190812797848, 799135046351 ]
+    Default: 590183797493
+    AllowedValues: [ 190812797848, 799135046351, 682816785079, 637423407294, 590183797493 ]
 Resources:
   ObjectStoreBucket:
     Properties:
