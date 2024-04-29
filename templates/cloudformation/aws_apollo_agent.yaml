@@ -85,7 +85,7 @@ Parameters:
     Description: Optionally specify a VPC ID to deploy the agent into.
     Type: String
   ImageUri:
-    Default: 752656882040.dkr.ecr.*.amazonaws.com/mcd-agent:latest
+    Default: 590183797493.dkr.ecr.*.amazonaws.com/mcd-agent:latest
     Description: >
       URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
       is deployed in.
@@ -204,7 +204,7 @@ Resources:
           MCD_STORAGE_BUCKET_NAME: !Ref Storage
           MCD_AGENT_IS_REMOTE_UPGRADABLE: !If [ ShouldCreateUpdatePolicy, True, False ]
           MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
-          MCD_AGENT_WRAPPER_VERSION: 0.1.2
+          MCD_AGENT_WRAPPER_VERSION: 0.1.3
           MCD_STACK_ID: !Ref 'AWS::StackId'
           MCD_LOG_GROUP_ID: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda"
           MCD_AGENT_CONNECTED_TO_A_VPC: !If [ ShouldConnectVPC, True, False ]
