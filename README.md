@@ -46,8 +46,8 @@ Parameters:
       Select the Monte Carlo account your collection service is hosted in. This can be found in the 
       'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
     Type: String
-    Default: 190812797848
-    AllowedValues: [ 190812797848, 799135046351, 682816785079 ]
+    Default: 590183797493
+    AllowedValues: [ 190812797848, 799135046351, 682816785079, 637423407294, 590183797493 ]
   ConcurrentExecutions:
     Default: 20
     Description: The number of concurrent lambda executions for the agent.
@@ -55,7 +55,7 @@ Parameters:
     MinValue: 0
     Type: Number
   ImageUri:
-    Default: 752656882040.dkr.ecr.*.amazonaws.com/mcd-agent:latest
+    Default: 590183797493.dkr.ecr.*.amazonaws.com/mcd-agent:latest
     Description: >
       URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
       is deployed in.
