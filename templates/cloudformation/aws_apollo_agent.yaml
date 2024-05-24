@@ -391,7 +391,7 @@ Resources:
             Principal:
               AWS: !If
                 - ShouldSkipCloudAccountPolicy
-                - [!Sub 'arn:aws:iam::590183797493:root']
+                - ['arn:aws:iam::590183797493:root']
                 - [!Sub 'arn:aws:iam::${CloudAccountId}:root', 'arn:aws:iam::590183797493:root']
             Action: sts:AssumeRole
             Condition:
