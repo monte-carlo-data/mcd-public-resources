@@ -56,11 +56,13 @@ Metadata:
 Parameters:
   CloudAccountId:
     Description: >
-      Select the Monte Carlo account your collection service is hosted in. This can be found in the 
-      'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
+      The service that invokes the agent is being migrated to the AWS Account with ID: 590183797493.
+      For accounts created after April 24th, 2024 select 590183797493, for previously created
+      accounts select the Monte Carlo account your collection service is hosted in.
+      This can be found in the 'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
     Type: String
-    Default: 590183797493
-    AllowedValues: [ 190812797848, 799135046351, 682816785079, 637423407294, 590183797493 ]
+    Default: '590183797493'
+    AllowedValues: [ '190812797848', '799135046351', '682816785079', '637423407294', '590183797493' ]
   ConcurrentExecutions:
     Default: 42
     Description: The number of concurrent lambda executions for the agent.
@@ -124,6 +126,9 @@ Conditions:
     - !Not [ !Equals [ !Join [ '', !Ref ExistingSubnetIds ], 'N/A' ] ]
     - !Not [ !Equals [ !Ref ExistingVpcId, '' ] ]
     - !Not [ !Equals [ !Join [ '', !Ref ExistingSubnetIds ], '' ] ]
+  ShouldSkipCloudAccountPolicy: !Equals
+    - !Ref 'CloudAccountId'
+    - '590183797493'
 Resources:
   Storage:
     Properties:
@@ -204,7 +209,7 @@ Resources:
           MCD_STORAGE_BUCKET_NAME: !Ref Storage
           MCD_AGENT_IS_REMOTE_UPGRADABLE: !If [ ShouldCreateUpdatePolicy, True, False ]
           MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
-          MCD_AGENT_WRAPPER_VERSION: 0.1.3
+          MCD_AGENT_WRAPPER_VERSION: 0.1.4
           MCD_STACK_ID: !Ref 'AWS::StackId'
           MCD_LOG_GROUP_ID: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda"
           MCD_AGENT_CONNECTED_TO_A_VPC: !If [ ShouldConnectVPC, True, False ]
@@ -387,7 +392,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${CloudAccountId}:root'
+              AWS: !If
+                - ShouldSkipCloudAccountPolicy
+                - ['arn:aws:iam::590183797493:root']
+                - [!Sub 'arn:aws:iam::${CloudAccountId}:root', 'arn:aws:iam::590183797493:root']
             Action: sts:AssumeRole
             Condition:
               StringEquals:
