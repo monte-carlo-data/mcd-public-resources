@@ -35,69 +35,8 @@ a data store on AWS.
 This template creates a VPC with 2 public and private subnets. Includes a NAT, IGW, and S3 VPCE.
 Can be used to connect an Agent to a VPC for peering and/or IP whitelisting.
 
-The following example demonstrates how you can deploy an agent with this connected VPC in one stack:
-
-```yaml
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Example template that deploys an agent with a connected VPC by leveraging nested stacks.
-Parameters:
-  CloudAccountId:
-    Description: >
-      Select the Monte Carlo account your collection service is hosted in. This can be found in the 
-      'settings/integrations/collectors' tab on the UI or via the 'montecarlo collectors list' command on the CLI.
-    Type: String
-    Default: 590183797493
-    AllowedValues: [ 190812797848, 799135046351, 682816785079, 637423407294, 590183797493 ]
-  ConcurrentExecutions:
-    Default: 20
-    Description: The number of concurrent lambda executions for the agent.
-    MaxValue: 200
-    MinValue: 0
-    Type: Number
-  ImageUri:
-    Default: 590183797493.dkr.ecr.*.amazonaws.com/mcd-agent:latest
-    Description: >
-      URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
-      is deployed in.
-    Type: String
-  MemorySize:
-    Default: 512
-    Description: >
-      The amount of memory (MB) available to the agent at runtime; this value can be any multiple of 
-      1 MB greater than 256MB.
-    MinValue: 256
-    MaxValue: 10240
-    Type: Number
-Outputs:
-  FunctionArn:
-    Description: Agent Function ARN. To be used in registering.
-    Value: !GetAtt Agent.Outputs.FunctionArn
-  InvocationRoleArn:
-    Description: Assumable role ARN. To be used in registering.
-    Value: !GetAtt Agent.Outputs.InvocationRoleArn
-  InvocationRoleExternalId:
-    Description: Assumable role External ID. To be used in registering.
-    Value: !GetAtt Agent.Outputs.InvocationRoleExternalId
-  PublicIP:
-    Description: IP address from which agent resources access the Internet (e.g. for IP whitelisting).
-    Value: !GetAtt Networking.Outputs.PublicIP
-Resources:
-  Networking:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/basic_vpc.yaml
-  Agent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
-      Parameters:
-        CloudAccountId: !Ref CloudAccountId
-        ConcurrentExecutions: !Ref ConcurrentExecutions
-        ExistingVpcId: !GetAtt Networking.Outputs.VpcId
-        ExistingSubnetIds: !Join [ ',', [ !GetAtt Networking.Outputs.PrivateSubnetAz1, !GetAtt Networking.Outputs.PrivateSubnetAz2 ] ]
-        ImageUri: !Ref ImageUri
-        MemorySize: !Ref MemorySize
-```
+This [example](templates/cloudformation/aws_agent_with_basic_vpc.yaml) demonstrates how you can deploy an agent with
+this connected VPC in one stack.
 
 ### Terraform
 
