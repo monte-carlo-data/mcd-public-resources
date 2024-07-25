@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Monte Carlo's containerized agent (Beta). See details here: https://docs.getmontecarlo.com/docs/platform-architecture
+  Monte Carlo's containerized agent. See details here: https://docs.getmontecarlo.com/docs/platform-architecture
 Metadata:
   License: >
     Copyright 2023 Monte Carlo Data, Inc.
@@ -208,7 +208,7 @@ Resources:
           MCD_STORAGE_BUCKET_NAME: !Ref Storage
           MCD_AGENT_IS_REMOTE_UPGRADABLE: !If [ ShouldCreateUpdatePolicy, True, False ]
           MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
-          MCD_AGENT_WRAPPER_VERSION: 0.1.4
+          MCD_AGENT_WRAPPER_VERSION: 1.0.0
           MCD_STACK_ID: !Ref 'AWS::StackId'
           MCD_LOG_GROUP_ID: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${AWS::Partition}/lambda/${AWS::StackName}-AgentLambda"
           MCD_AGENT_CONNECTED_TO_A_VPC: !If [ ShouldConnectVPC, True, False ]

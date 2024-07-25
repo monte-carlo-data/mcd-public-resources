@@ -8,7 +8,7 @@ Publicly available templates and other resources to assist customers with onboar
 
 #### <ins>Monte Carlo's agent template for customer-hosted agent & object storage deployments in AWS ([source](templates/cloudformation/aws_apollo_agent.yaml))</ins>
 
-This template deploys Monte Carlo's [containerized agent](https://hub.docker.com/r/montecarlodata/agent) (Beta) on AWS
+This template deploys Monte Carlo's [containerized agent](https://hub.docker.com/r/montecarlodata/agent) on AWS
 Lambda, along with storage, and roles:
 
 <img src="references/images/aws_apollo_agent_arch.png" width="400" alt="AWS Agent High Level Architecture">
