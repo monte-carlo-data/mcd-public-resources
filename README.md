@@ -1,4 +1,4 @@
-# Monte Carlo IaC Resources
+# Monte Carlo Resources
 
 Publicly available templates and other resources to assist customers with onboarding and using the platform.
 
