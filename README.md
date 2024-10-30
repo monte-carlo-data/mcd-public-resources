@@ -112,6 +112,9 @@ to `s3://mcd-public-resources` (requires review, linting, validation, and approv
 | Monte Carlo's agent module for customer-hosted deployments in AWS   | https://github.com/monte-carlo-data/terraform-aws-mcd-agent     |
 | Monte Carlo's agent module for customer-hosted deployments in Azure | https://github.com/monte-carlo-data/terraform-azurerm-mcd-agent |
 
+## Scripts
+The scripts that live here are scripts that are meant to interract with external resources (e.g. Databricks) that will connect with Monte Carlo.
+
 ## License
 
 See [LICENSE](LICENSE) for more information.
