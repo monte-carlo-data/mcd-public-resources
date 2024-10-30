@@ -1,0 +1,2 @@
+databricks-sdk==0.34.0
+click>=8.1.3
