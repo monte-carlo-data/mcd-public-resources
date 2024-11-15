@@ -113,7 +113,13 @@ to `s3://mcd-public-resources` (requires review, linting, validation, and approv
 | Monte Carlo's agent module for customer-hosted deployments in Azure | https://github.com/monte-carlo-data/terraform-azurerm-mcd-agent |
 
 ## Scripts
-The scripts that live here are scripts that are meant to interract with external resources (e.g. Databricks) that will connect with Monte Carlo.
+The scripts that live here are scripts that are meant to interract with external resources (e.g. Databricks) that will connect with Monte Carlo, but not with Monte Carlo directly.
+
+### Databricks
+
+#### <ins> Add Monte Carlo Webhook Notifications([source](scripts/databricks/add_monte_carlo_webhook_notifications.py))</ins>
+
+This script interacts with your Databricks jobs and adds the configured Monte Carlo Webhook as a Notification on failure
 
 ## License
 

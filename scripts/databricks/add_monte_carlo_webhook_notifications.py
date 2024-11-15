@@ -8,35 +8,41 @@ from databricks.sdk.service.jobs import Webhook, WebhookNotifications
 @click.command(help="Add the monte carlo webhook to Databricks jobs")
 @click.pass_obj
 @click.option(
-    "--mc-notification-id",
+    "--mcd-notification-id",
     required=True,
-    help="UUID of the existing Databricks Notification pointing to the MC Webhook endpoint",
+    help="UUID of the existing Databricks Notification pointing to the MC Webhook endpoint.",
 )
 @click.option(
-    "--job-name",
+    "--databricks-job-name",
     required=False,
     multiple=True,
-    help="Job Name to add the MC Webhook to. Can be used multiple times. If not specified, add the MC Webhook to all jobs.",
+    help="Databricks Job Name to add the MC Webhook to. Can be used multiple times. If not specified, add the MC Webhook to all jobs.",
 )
 def add_monte_carlo_webhook_notifications(ctx, **kwargs):
-    job_names = set(kwargs["job_name"])
+    databricks_job_names = set(kwargs["databricks_job_name"])
     _add_monte_carlo_webhook_notifications(
-        mc_notification_id=kwargs["mc_notification_id"], job_names=job_names
+        mc_notification_id=kwargs["mc_notification_id"], databricks_job_names=databricks_job_names
     )
 
 
 def _add_monte_carlo_webhook_notifications(
-    mc_notification_id: str, job_names: Set[str]
+    mc_notification_id: str, databricks_job_names: Set[str]
 ):
-    w = WorkspaceClient()
+    workspace_client = WorkspaceClient()
 
     # assert that the notification exists
-    w.notification_destinations.get(id=mc_notification_id)
+    workspace_client.notification_destinations.get(id=mc_notification_id)
     mc_notification = Webhook(id=mc_notification_id)
 
-    for job in w.jobs.list():
+    jobs = workspace_client.jobs.list()
+
+    click.echo(
+        f"Configuring the Monte Carlo webhook for {len(jobs)} jobs"
+    )
+
+    for job in jobs:
         job_name = job.settings.name
-        if job_names and job.settings.name not in job_names:
+        if databricks_job_names and job.settings.name not in databricks_job_names:
             continue
 
         existing_settings = job.settings
@@ -49,7 +55,7 @@ def _add_monte_carlo_webhook_notifications(
                 updated_webhooks.on_failure.append(mc_notification)
             else:
                 click.echo(
-                    f"The monte carlo webhook is already configured for {job_name}"
+                    f"The Monte Carlo webhook is already configured for {job_name}"
                 )
                 continue
 
@@ -57,11 +63,11 @@ def _add_monte_carlo_webhook_notifications(
         new_settings.webhook_notifications = updated_webhooks
 
         try:
-            w.jobs.update(job_id=job.job_id, new_settings=new_settings)
-            click.echo(f"Successfully added the monte carlo webhook to {job_name}")
+            workspace_client.jobs.update(job_id=job.job_id, new_settings=new_settings)
+            click.echo(f"Successfully added the Monte Carlo webhook to {job_name}")
         except Exception as e:
             click.echo(
-                f"Failed to add the monte carlo webhook to {job_name} due to {str(e)}"
+                f"Failed to add the Monte Carlo webhook to {job_name} due to {str(e)}", err=True
             )
 
 
