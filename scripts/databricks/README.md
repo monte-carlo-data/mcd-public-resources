@@ -34,3 +34,5 @@ https://<your-databricks-workspace>/settings/workspace/notifications/notificatio
 ```
 
 and by clicking the Monte Carlo Webhook notification, and clickng on `Copy destination ID`
+
+<img width="655" alt="Screenshot 2024-11-18 at 3 39 09 PM" src="https://github.com/user-attachments/assets/88344e3b-1337-4a23-9137-f758962a941a">
