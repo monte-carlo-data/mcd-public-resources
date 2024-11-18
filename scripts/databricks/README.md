@@ -27,3 +27,10 @@ Options:
                               add the MC Webhook to all jobs.
   --help                      Show this message and exit.
 ```
+
+You can get the UUID for your Monte Carlo Webhook in Databricks from
+```
+https://<your-databricks-workspace>/settings/workspace/notifications/notification-destinations
+```
+
+and by clicking the Monte Carlo Webhook notification, and clickng on `Copy destination ID`
