@@ -36,3 +36,9 @@ https://<your-databricks-workspace>/settings/workspace/notifications/notificatio
 and by clicking the Monte Carlo Webhook notification, and clickng on `Copy destination ID`
 
 <img width="655" alt="Screenshot 2024-11-18 at 3 41 39 PM" src="https://github.com/user-attachments/assets/b51f852f-834c-4eeb-b81b-d9d64d10587e">
+
+You can get the Job Names from the Databricks Workflows page
+
+```
+https://<your-databricks-workspace>/jobs
+```
