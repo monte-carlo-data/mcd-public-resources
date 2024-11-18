@@ -5,7 +5,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.jobs import Webhook, WebhookNotifications
 
 
-@click.command(help="Add the monte carlo webhook to Databricks jobs")
+@click.command(help="Add the Monte Carlo webhook to Databricks jobs")
 @click.pass_obj
 @click.option(
     "--mcd-notification-id",
@@ -19,6 +19,9 @@ from databricks.sdk.service.jobs import Webhook, WebhookNotifications
     help="Databricks Job Name to add the MC Webhook to. Can be used multiple times. If not specified, add the MC Webhook to all jobs.",
 )
 def add_monte_carlo_webhook_notifications(ctx, **kwargs):
+    """
+    Add the Monte Carlo Webhook to notify on Job Failures
+    """
     databricks_job_names = set(kwargs["databricks_job_name"])
     _add_monte_carlo_webhook_notifications(
         mc_notification_id=kwargs["mc_notification_id"], databricks_job_names=databricks_job_names
