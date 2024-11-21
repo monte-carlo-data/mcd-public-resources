@@ -117,9 +117,10 @@ The scripts that live here are scripts that are meant to interact with external 
 
 ### Databricks
 
-#### <ins> Add Monte Carlo Webhook Notifications([source](scripts/databricks/add_monte_carlo_webhook_notifications.py))</ins>
+#### <ins> Add Monte Carlo Webhook Notifications([source](scripts/databricks/enable_monte_carlo_databricks_job_incidents.py))</ins>
 
-This script interacts with your Databricks jobs and adds the configured Monte Carlo Webhook as a Notification on job failures.
+This script interacts with your Databricks jobs by adding the configured Monte Carlo Webhook as a Notification on job failures,
+and giving `CAN_VIEW` permissions to the Monte Carlo Service Principal.
 
 ## License
 
