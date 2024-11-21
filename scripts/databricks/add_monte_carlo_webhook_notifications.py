@@ -40,7 +40,7 @@ def _add_monte_carlo_webhook_notifications(
     jobs = workspace_client.jobs.list()
 
     click.echo(
-        f"Configuring the Monte Carlo webhook for {len(jobs)} jobs"
+        f"Configuring the Monte Carlo Webhook for {len(jobs)} jobs"
     )
 
     for job in jobs:
