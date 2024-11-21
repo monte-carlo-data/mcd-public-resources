@@ -2,7 +2,13 @@ from typing import Set
 
 import click
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.jobs import Webhook, WebhookNotifications, Job, JobAccessControlRequest, JobPermissionLevel
+from databricks.sdk.service.jobs import (
+    Webhook,
+    WebhookNotifications,
+    Job,
+    JobAccessControlRequest,
+    JobPermissionLevel,
+)
 from databricks.sdk.service.iam import ServicePrincipal
 
 
@@ -59,9 +65,7 @@ def _enable_monte_carlo_databricks_job_incidents(
 
     jobs = list(workspace_client.jobs.list())
 
-    click.echo(
-        f"Configuring the Monte Carlo webhook for {len(jobs)} jobs"
-    )
+    click.echo(f"Configuring the Monte Carlo webhook for {len(jobs)} jobs")
 
     for job in jobs:
         job_name = job.settings.name
@@ -71,7 +75,10 @@ def _enable_monte_carlo_databricks_job_incidents(
         _add_monte_carlo_webhook_to_job(workspace_client, job, mcd_notification)
         _add_can_view_permissions(workspace_client, job, mcd_service_principal)
 
-def _add_monte_carlo_webhook_to_job(workspace_client: WorkspaceClient, job: Job, mcd_notification: Webhook):
+
+def _add_monte_carlo_webhook_to_job(
+    workspace_client: WorkspaceClient, job: Job, mcd_notification: Webhook
+):
     job_name = job.settings.name
     existing_settings = job.settings
     existing_webhooks = existing_settings.webhook_notifications
@@ -82,9 +89,7 @@ def _add_monte_carlo_webhook_to_job(workspace_client: WorkspaceClient, job: Job,
         if mcd_notification not in updated_webhooks.on_failure:
             updated_webhooks.on_failure.append(mcd_notification)
         else:
-            click.echo(
-                f"The Monte Carlo webhook is already configured for {job_name}"
-            )
+            click.echo(f"The Monte Carlo webhook is already configured for {job_name}")
             return
 
     new_settings = existing_settings
@@ -95,10 +100,14 @@ def _add_monte_carlo_webhook_to_job(workspace_client: WorkspaceClient, job: Job,
         click.echo(f"Successfully added the Monte Carlo webhook to {job_name}")
     except Exception as e:
         click.echo(
-            f"Failed to add the Monte Carlo webhook to {job_name} due to {str(e)}", err=True
+            f"Failed to add the Monte Carlo webhook to {job_name} due to {str(e)}",
+            err=True,
         )
 
-def _add_can_view_permissions(workspace_client: WorkspaceClient, job: Job, mcd_service_principal: ServicePrincipal):
+
+def _add_can_view_permissions(
+    workspace_client: WorkspaceClient, job: Job, mcd_service_principal: ServicePrincipal
+):
     job_name = job.settings.name
     permission_to_add = JobAccessControlRequest(
         service_principal_name=mcd_service_principal.application_id,
@@ -106,13 +115,16 @@ def _add_can_view_permissions(workspace_client: WorkspaceClient, job: Job, mcd_s
     )
 
     try:
-        workspace_client.jobs.update_permissions(job_id=job.job_id, access_control_list=[permission_to_add])
+        workspace_client.jobs.update_permissions(
+            job_id=job.job_id, access_control_list=[permission_to_add]
+        )
         click.echo(
             f"Successfully gave Can View permissions to the Monte Carlo Service Principal for {job_name}"
         )
     except Exception as e:
         click.echo(
-            f"Failed to give Can Veiw permissions the Monte Carlo Service Principal for {job_name} due to {str(e)}", err=True
+            f"Failed to give Can Veiw permissions the Monte Carlo Service Principal for {job_name} due to {str(e)}",
+            err=True,
         )
 
 
