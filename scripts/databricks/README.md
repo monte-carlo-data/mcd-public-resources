@@ -17,7 +17,7 @@ This script interacts with your Databricks jobs and adds the configured Monte Ca
 ```
 Usage: add_monte_carlo_webhook_notifications.py [OPTIONS]
 
-  Add the Monte Carlo webhook to Databricks jobs
+  Add the Monte Carlo Webhook to Databricks jobs
 
 Options:
   --mcd-notification-id TEXT  UUID of the existing Databricks Notification
