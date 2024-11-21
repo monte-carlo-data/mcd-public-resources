@@ -5,7 +5,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.jobs import Webhook, WebhookNotifications
 
 
-@click.command(help="Add the Monte Carlo webhook to Databricks jobs")
+@click.command(help="Add the Monte Carlo Webhook to Databricks jobs")
 @click.pass_obj
 @click.option(
     "--mcd-notification-id",
