@@ -70,7 +70,7 @@ def _add_monte_carlo_webhook_notifications(
             click.echo(f"Successfully added the Monte Carlo webhook to {job_name}")
         except Exception as e:
             click.echo(
-                f"Failed to add the Monte Carlo webhook to {job_name} due to {str(e)}", err=True
+                f"Failed to add the Monte Carlo Webhook to {job_name} due to {str(e)}", err=True
             )
 
 
