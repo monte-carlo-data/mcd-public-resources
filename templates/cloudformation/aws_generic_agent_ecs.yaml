@@ -8,6 +8,10 @@ Parameters:
     Type: String
     Description: 'The Security Group ID for the ECS Service'
 
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'The VPC ID for the ECS Service'
+
 Resources:
   McAgentCluster:
     Type: 'AWS::ECS::Cluster'
@@ -72,6 +76,48 @@ Resources:
           SecurityGroups:
             - !Ref SecurityGroupId
           AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: 'mc-agent-container'
+          ContainerPort: 8081
+          TargetGroupArn: !Ref McAgentTargetGroup
+      Tags:
+        - Key: 'mcd:agent:platform'
+          Value: 'aws_generic'
+
+  McAgentLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: 'mc-agent-alb'
+      Subnets: !Ref VpcSubnetIds
+      SecurityGroups:
+        - !Ref SecurityGroupId
+      Scheme: 'internet-facing'
+      Tags:
+        - Key: 'mcd:agent:platform'
+          Value: 'aws_generic'
+
+  McAgentListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      LoadBalancerArn: !Ref McAgentLoadBalancer
+      Port: 80
+      Protocol: 'HTTP'
+      DefaultActions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref McAgentTargetGroup
+
+  McAgentTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 8081
+      Protocol: 'HTTP'
+      TargetType: 'ip'
+      HealthCheckPath: '/'
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 2
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
