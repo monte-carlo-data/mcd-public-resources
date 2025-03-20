@@ -13,6 +13,15 @@ Parameters:
     Description: 'The VPC ID for the ECS Service'
 
 Resources:
+  McAgentLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: 'mc-agent-log-group'
+      RetentionInDays: 365
+      Tags:
+        - Key: 'mcd:agent:platform'
+          Value: 'aws_generic'
+
   McAgentCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
@@ -42,7 +51,7 @@ Resources:
             - Name: "MCD_AGENT_CLOUD_PLATFORM"
               Value: "AWS_GENERIC"
             - Name: "MCD_LOG_GROUP_ID"
-              Value: "<ARN_of_your_AWS_log_group>"
+              Value: !Ref McAgentLogGroup
             - Name: "MCD_STORAGE"
               Value: "S3"
             - Name: "MCD_STORAGE_BUCKET_NAME"
@@ -61,6 +70,12 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 0
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref McAgentLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: mc-agent
 
   McAgentLoadBalancer:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
@@ -160,6 +175,16 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3:::${McAgentS3Bucket}'
                   - !Sub 'arn:aws:s3:::${McAgentS3Bucket}/*'
+        - PolicyName: 'mc-agent-log-access-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: 'FilterLogGroupLogs'
+                Effect: 'Allow'
+                Action:
+                  - 'logs:FilterLogEvents'
+                Resource:
+                  - !GetAtt McAgentLogGroup.Arn
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Tags:
