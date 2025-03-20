@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Parameters:
-  VpcSubnetId:
-    Type: String
-    Description: 'The Subnet ID for the ECS Service'
+  VpcSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'The Subnet IDs for the ECS Service'
 
   SecurityGroupId:
     Type: String
@@ -68,8 +68,7 @@ Resources:
       ServiceName: 'mc-agent-service'
       NetworkConfiguration:
         AwsvpcConfiguration:
-          Subnets:
-            - !Ref VpcSubnetId
+          Subnets: !Ref VpcSubnetIds
           SecurityGroups:
             - !Ref SecurityGroupId
           AssignPublicIp: ENABLED
