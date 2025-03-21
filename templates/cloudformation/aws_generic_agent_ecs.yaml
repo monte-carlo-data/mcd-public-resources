@@ -1,63 +1,111 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Monte Carlo's containerized agent. See details here: https://docs.getmontecarlo.com/docs/platform-architecture
+Metadata:
+  License: >
+    Copyright 2023 Monte Carlo Data, Inc.
+
+    The Software contained herein (the “Software”) is the intellectual property of Monte Carlo Data, Inc. (“Licensor”),
+    and Licensor retains all intellectual property rights in the Software, including any and all derivatives, changes and
+    improvements thereto. Only customers who have entered into a commercial agreement with Licensor for use or
+    purchase of the Software (“Licensee”) are licensed or otherwise authorized to use the Software, and any Licensee
+    agrees that it obtains no copyright or other intellectual property rights to the Software, except for the license
+    expressly granted below or in accordance with the terms of their commercial agreement with Licensor (the
+    “Agreement”). Subject to the terms and conditions of the Agreement, Licensor grants Licensee a non-exclusive,
+    non-transferable, non-sublicensable, revocable, limited right and license to use the Software, in each case solely
+    internally within Licensee’s organization for non-commercial purposes and only in connection with the service
+    provided by Licensor pursuant to the Agreement, and in object code form only. Without Licensor’s express prior
+    written consent, Licensee may not, directly or indirectly, (i) distribute the Software, any portion thereof, or any
+    modifications, enhancements, or derivative works of any of the foregoing (collectively, the “Derivatives”) to any
+    third party, (ii) license, market, sell, offer for sale or otherwise attempt to commercialize any Software, Derivatives,
+    or portions thereof, (iii) use the Software, Derivatives, or any portion thereof for the benefit of any third party, (iv)
+    use the Software, Derivatives, or any portion thereof in any manner or with respect to any commercial activity
+    which competes, or is reasonably likely to compete, with any business that Licensor conducts, proposes to conduct
+    or demonstrably anticipates conducting, at any time; or (v) seek any patent or other intellectual property rights or
+    protections over or in connection with any Software of Derivatives.
 Parameters:
   VpcSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: 'The Subnet IDs for the ECS Service'
 
   SecurityGroupId:
-    Type: String
+    Type: AWS::EC2::SecurityGroup::Id
     Description: 'The Security Group ID for the ECS Service'
 
   VpcId:
+    # Monte Carlo recommends a VPC with endpoints for S3 and CloudWatch Logs
     Type: AWS::EC2::VPC::Id
     Description: 'The VPC ID for the ECS Service'
 
+  ContainerPort:
+    Type: Number
+    Description: 'The port for the ECS Service'
+    Default: 8081
+
+  TaskDefinitionCpu:
+    Type: Number
+    Description: 'The CPU for the ECS Service'
+    Default: 2048
+
+  TaskDefinitionMemory:
+    Type: Number
+    Description: 'The Memory for the ECS Service'
+    Default: 6144
+
+  TaskDefinitionImage:
+    Type: String
+    Description: 'The Monte Carlo Agent Docker image for the ECS Service'
+    Default: 'docker.io/montecarlodata/agent:latest-aws-generic'
+
 Resources:
-  McAgentLogGroup:
+  LogGroup:
     Type: 'AWS::Logs::LogGroup'
     Properties:
-      LogGroupName: 'mc-agent-log-group'
-      RetentionInDays: 365
+      RetentionInDays: 14
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
 
-  McAgentCluster:
+  EcsCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
-      ClusterName: 'mc-agent-cluster'
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
 
-  McAgentTaskDefinition:
+  EcsTaskDefinition:
     Type: 'AWS::ECS::TaskDefinition'
     Properties:
-      Family: 'mc-agent-task'
       NetworkMode: 'awsvpc'
       RequiresCompatibilities: ['FARGATE']
-      Cpu: '2048'
-      Memory: '6144'
-      ExecutionRoleArn: !GetAtt McAgentTaskRole.Arn
-      TaskRoleArn: !GetAtt McAgentTaskRole.Arn
+      Cpu: !Ref TaskDefinitionCpu
+      Memory: !Ref TaskDefinitionMemory
+      ExecutionRoleArn: !GetAtt EcsTaskRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
       ContainerDefinitions:
         - Name: 'mc-agent-container'
-          Image: 'docker.io/montecarlodata/agent:1.3.5-aws-generic'
+          Image: !Ref TaskDefinitionImage
           Essential: true
           PortMappings:
-            - ContainerPort: 8081
+            - ContainerPort: !Ref ContainerPort
               Protocol: tcp
           Environment:
             - Name: "MCD_AGENT_CLOUD_PLATFORM"
               Value: "AWS_GENERIC"
             - Name: "MCD_LOG_GROUP_ID"
-              Value: !Ref McAgentLogGroup
+              Value: !Ref LogGroup
             - Name: "MCD_STORAGE"
               Value: "S3"
             - Name: "MCD_STORAGE_BUCKET_NAME"
-              Value: !Ref McAgentS3Bucket
+              Value: !Ref Storage
+            - Name: "MCD_AGENT_IMAGE_TAG"
+              Value: 'latest-aws-generic'
+            - Name: "MCD_AGENT_WRAPPER_TYPE"
+              Value: "ecs"
+            - Name: "MCD_AGENT_IS_REMOTE_UPGRADABLE"
+              Value: "false"
             - Name: "PORT"
-              Value: "8081"
+              Value: !Ref ContainerPort
             - Name: "GUNICORN_TIMEOUT"
               Value: "0"
             - Name: "GUNICORN_THREADS"
@@ -73,27 +121,26 @@ Resources:
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              awslogs-group: !Ref McAgentLogGroup
+              awslogs-group: !Ref LogGroup
               awslogs-region: !Ref "AWS::Region"
               awslogs-stream-prefix: mc-agent
 
-  McAgentLoadBalancer:
+  LoadBalancer:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
     Properties:
-      Name: 'mc-agent-alb'
       Subnets: !Ref VpcSubnetIds
       SecurityGroups:
         - !Ref SecurityGroupId
-      Scheme: 'internet-facing'
+      Scheme: 'internal'
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
 
-  McAgentTargetGroup:
+  TargetGroup:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     Properties:
       VpcId: !Ref VpcId
-      Port: 8081
+      Port: !Ref ContainerPort
       Protocol: 'HTTP'
       TargetType: 'ip'
       HealthCheckPath: '/'
@@ -105,26 +152,25 @@ Resources:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
 
-  McAgentListener:
+  Listener:
     Type: 'AWS::ElasticLoadBalancingV2::Listener'
     Properties:
-      LoadBalancerArn: !Ref McAgentLoadBalancer
+      LoadBalancerArn: !Ref LoadBalancer
       Port: 80
       Protocol: 'HTTP'
       DefaultActions:
         - Type: 'forward'
-          TargetGroupArn: !Ref McAgentTargetGroup
+          TargetGroupArn: !Ref TargetGroup
 
-  McAgentService:
+  EcsService:
     Type: 'AWS::ECS::Service'
     DependsOn: 
-      - McAgentListener
+      - Listener
     Properties:
-      Cluster: !Ref McAgentCluster
+      Cluster: !Ref EcsCluster
       DesiredCount: 1
       LaunchType: 'FARGATE'
-      TaskDefinition: !Ref McAgentTaskDefinition
-      ServiceName: 'mc-agent-service'
+      TaskDefinition: !Ref EcsTaskDefinition
       NetworkConfiguration:
         AwsvpcConfiguration:
           Subnets: !Ref VpcSubnetIds
@@ -133,21 +179,58 @@ Resources:
           AssignPublicIp: ENABLED
       LoadBalancers:
         - ContainerName: 'mc-agent-container'
-          ContainerPort: 8081
-          TargetGroupArn: !Ref McAgentTargetGroup
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
 
-  McAgentS3Bucket:
-    Type: 'AWS::S3::Bucket'
+  Storage:
     Properties:
-      BucketName: 'mc-agent-s3-bucket'
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 90
+            Prefix: 'mcd/'
+            Status: Enabled
+          - ExpirationInDays: 2
+            Prefix: 'mcd/responses/'
+            Status: Enabled
+    Type: AWS::S3::Bucket
 
-  McAgentTaskRole:
+  StorageSSLPolicy:
+    Properties:
+      Bucket: !Ref Storage
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyActionsWithoutSSL
+            Effect: Deny
+            Principal:
+              AWS: '*'
+            Action:
+              - '*'
+            Resource:
+              - !GetAtt Storage.Arn
+              - !Sub '${Storage.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport:
+                  - false
+    Type: AWS::S3::BucketPolicy
+
+  EcsTaskRole:
     Type: 'AWS::IAM::Role'
     Properties:
       AssumeRolePolicyDocument:
@@ -173,8 +256,8 @@ Resources:
                   - 's3:GetBucketPolicyStatus'
                   - 's3:GetBucketAcl'
                 Resource:
-                  - !Sub 'arn:aws:s3:::${McAgentS3Bucket}'
-                  - !Sub 'arn:aws:s3:::${McAgentS3Bucket}/*'
+                  - !Sub 'arn:aws:s3:::${Storage}'
+                  - !Sub 'arn:aws:s3:::${Storage}/*'
         - PolicyName: 'mc-agent-log-access-policy'
           PolicyDocument:
             Version: '2012-10-17'
@@ -184,7 +267,7 @@ Resources:
                 Action:
                   - 'logs:FilterLogEvents'
                 Resource:
-                  - !GetAtt McAgentLogGroup.Arn
+                  - !GetAtt LogGroup.Arn
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Tags:
