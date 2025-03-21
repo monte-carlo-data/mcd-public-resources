@@ -99,7 +99,7 @@ Resources:
             - Name: "MCD_STORAGE_BUCKET_NAME"
               Value: !Ref Storage
             - Name: "MCD_AGENT_IMAGE_TAG"
-              Value: 'latest-aws-generic'
+              Value: !Ref TaskDefinitionImage
             - Name: "MCD_AGENT_WRAPPER_TYPE"
               Value: "ecs"
             - Name: "MCD_AGENT_IS_REMOTE_UPGRADABLE"
