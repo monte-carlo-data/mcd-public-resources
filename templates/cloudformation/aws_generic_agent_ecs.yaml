@@ -102,6 +102,8 @@ Resources:
               Value: !Ref TaskDefinitionImage
             - Name: "MCD_AGENT_WRAPPER_TYPE"
               Value: "CLOUDFORMATION"
+            - Name: "MCD_AGENT_WRAPPER_VERSION"
+              Value: "1.0.1"
             - Name: "MCD_AGENT_IS_REMOTE_UPGRADABLE"
               Value: "false"
             - Name: "PORT"
