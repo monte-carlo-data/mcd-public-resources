@@ -30,7 +30,6 @@ Parameters:
       please contact your Monte Carlo representative for the ID.
     Type: String
     Default: 590183797493
-    AllowedValues: [ 190812797848, 799135046351, 682816785079, 637423407294, 590183797493 ]
   ConcurrentExecutions:
     Default: 20
     Description: The number of concurrent lambda executions for the agent.
