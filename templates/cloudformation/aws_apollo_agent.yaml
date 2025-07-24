@@ -38,6 +38,14 @@ Metadata:
           - ImageUri
           - MemorySize
           - ConcurrentExecutions
+      - Label:
+          default: Telemetry Collector Configuration
+        Parameters:
+          - DeployTelemetryCollector
+          - TelemetryCollectorContainerImage
+          - TelemetryCollectorExternalID
+          - TelemetryCollectorExternalAccessPrincipal
+          - TelemetryCollectorExternalNotificationChannelArn
     ParameterLabels:
       CloudAccountId:
         default: Select a Monte Carlo AWS Account ID
@@ -53,6 +61,16 @@ Metadata:
         default: Select the agent image source
       MemorySize:
         default: Set agent memory
+      DeployTelemetryCollector:
+        default: Deploy OpenTelemetry Collector
+      TelemetryCollectorContainerImage:
+        default: Telemetry collector container image
+      TelemetryCollectorExternalID:
+        default: External ID for telemetry access
+      TelemetryCollectorExternalAccessPrincipal:
+        default: External access principal
+      TelemetryCollectorExternalNotificationChannelArn:
+        default: SQS notification channel ARN
 Parameters:
   CloudAccountId:
     Description: >
@@ -98,6 +116,29 @@ Parameters:
     MinValue: 256
     MaxValue: 10240
     Type: Number
+  DeployTelemetryCollector:
+    AllowedValues:
+      - True
+      - False
+    Default: False
+    Description: Select True if you want to deploy the OpenTelemetry Collector for trace and metrics collection. Requires VPC configuration.
+    Type: String
+  TelemetryCollectorContainerImage:
+    Description: OpenTelemetry Collector container image
+    Type: String
+    Default: "otel/opentelemetry-collector-contrib:latest"
+  TelemetryCollectorExternalID:
+    Description: External ID for telemetry collector S3 access. Update this value later after the CF stack is created.
+    Type: String
+    Default: "000"
+  TelemetryCollectorExternalAccessPrincipal:
+    Description: AWS Principal (ARN or account ID) allowed to assume the telemetry collector external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
+    Type: String
+    Default: ""
+  TelemetryCollectorExternalNotificationChannelArn:
+    Description: SQS Queue ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the CF stack is created.
+    Type: String
+    Default: ""
 Outputs:
   FunctionArn:
     Description: Agent Function ARN. To be used in registering.
@@ -115,6 +156,18 @@ Outputs:
   StorageArn:
     Description: Storage bucket ARN.
     Value: !GetAtt Storage.Arn
+  TelemetryCollectorGRPCEndpoint:
+    Condition: ShouldDeployTelemetryCollectorWithVPC
+    Description: The gRPC endpoint for the OpenTelemetry Collector
+    Value: !GetAtt TelemetryCollectorStack.Outputs.OpenTelemetryCollectorGRPCEndpoint
+  TelemetryCollectorHTTPEndpoint:
+    Condition: ShouldDeployTelemetryCollectorWithVPC
+    Description: The HTTP endpoint for the OpenTelemetry Collector
+    Value: !GetAtt TelemetryCollectorStack.Outputs.OpenTelemetryCollectorHTTPEndpoint
+  TelemetryCollectorExternalAccessRoleArn:
+    Condition: ShouldDeployTelemetryCollectorWithVPC
+    Description: The ARN of the IAM role for external access to the telemetry data
+    Value: !GetAtt TelemetryCollectorStack.Outputs.ExternalAccessRoleArn
 Conditions:
   ShouldCreateUpdatePolicy: !Equals
     - !Ref EnableRemoteUpdates
@@ -127,6 +180,13 @@ Conditions:
   ShouldSkipCloudAccountPolicy: !Equals
     - !Ref 'CloudAccountId'
     - '590183797493'
+  ShouldDeployTelemetryCollectorWithVPC: !And
+    - !Equals [!Ref DeployTelemetryCollector, True]
+    - !And
+      - !Not [!Equals [!Ref ExistingVpcId, 'N/A']]
+      - !Not [!Equals [!Join ['', !Ref ExistingSubnetIds], 'N/A']]
+      - !Not [!Equals [!Ref ExistingVpcId, '']]
+      - !Not [!Equals [!Join ['', !Ref ExistingSubnetIds], '']]
 Resources:
   Storage:
     Properties:
@@ -146,6 +206,9 @@ Resources:
             Status: Enabled
           - ExpirationInDays: 2
             Prefix: 'mcd/responses/'
+            Status: Enabled
+          - ExpirationInDays: 30
+            Prefix: 'mcd-otel-collector/'
             Status: Enabled
       # CORS configuration required for access through pre-signed URLs from the browser
       CorsConfiguration:
@@ -429,6 +492,24 @@ Resources:
       IpProtocol: -1
       SourceSecurityGroupId: !Ref SecurityGroup
     Type: AWS::EC2::SecurityGroupIngress
+  TelemetryCollectorStack:
+    Condition: ShouldDeployTelemetryCollectorWithVPC
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/mcd-dev-public-resources/cloudformation/aws_otel_collector_ecs.yaml
+      Parameters:
+        ExistingVpcId: !Ref ExistingVpcId
+        ExistingSubnetIds: !Join [',', !Ref ExistingSubnetIds]
+        S3BucketArn: !GetAtt Storage.Arn
+        ContainerImage: !Ref TelemetryCollectorContainerImage
+        ExternalID: !Ref TelemetryCollectorExternalID
+        ExternalAccessPrincipal: !Ref TelemetryCollectorExternalAccessPrincipal
+        ExternalNotificationChannelArn: !Ref TelemetryCollectorExternalNotificationChannelArn
+      Tags:
+        - Key: Name
+          Value: monte-carlo-telemetry-collector
+        - Key: ParentStack
+          Value: !Ref AWS::StackName
 Rules:
   requireSubnet:
     Assertions:

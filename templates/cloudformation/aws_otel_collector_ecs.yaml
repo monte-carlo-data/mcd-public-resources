@@ -28,13 +28,17 @@ Metadata:
 Parameters:
   ExistingVpcId:
     AllowedPattern: '^(vpc[e]?-[0-9a-f]*)$'
-    Description: VPC ID to deploy the OpenTelemetry Collector into.
+    Description: VPC ID to deploy the OpenTelemetry Collector into. Required for ECS Fargate deployment.
     Type: String
 
   ExistingSubnetIds:
     Description: >
-      Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
+      Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector. Required for ECS Fargate deployment.
     Type: CommaDelimitedList
+
+  S3BucketArn:
+    Description: ARN of the S3 bucket to store OpenTelemetry data. Provided by the parent stack.
+    Type: String
 
   S3KeyPrefix:
     Description: The S3 key prefix for telemetry data
@@ -54,13 +58,6 @@ Parameters:
     Default: 4318
     MinValue: 1024
     MaxValue: 65535
-
-  BucketDataRetentionDays:
-    Description: Number of days to retain telemetry data in S3 bucket before deletion
-    Type: Number
-    Default: 30
-    MinValue: 1
-    MaxValue: 365
 
   TaskDesiredCount:
     Description: Desired number of running tasks for the OpenTelemetry Collector service
@@ -118,53 +115,26 @@ Parameters:
     Default: "10.0.0.0/8"
     AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$'
 
+  ExternalID:
+    Description: External ID to access the S3 bucket. Update this value later after the CF stack is created.
+    Type: String
+    Default: "000"
 
+  ExternalAccessPrincipal:
+    Description: AWS Principal (ARN or account ID) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
+    Type: String
+    Default: ""
+
+  ExternalNotificationChannelArn:
+    Description: SQS Queue ARN to receive S3 event notifications. If left empty, no notifications will be configured. Update this value later after the CF stack is created.
+    Type: String
+    Default: ""
+
+Conditions:
+  UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, ""]
+  EnableS3Notifications: !Not [!Equals [!Ref ExternalNotificationChannelArn, ""]]
 
 Resources:
-  # S3 bucket for storing OpenTelemetry data
-  Bucket:
-    Type: AWS::S3::Bucket
-    Description: S3 bucket for storing OpenTelemetry traces, metrics, and logs data
-    Properties:
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldData
-            Status: Enabled
-            ExpirationInDays: !Ref BucketDataRetentionDays
-      Tags:
-        - Key: Service
-          Value: "mcd-otel-collector"
-        - Key: Provider
-          Value: "monte-carlo"
-
-  BucketSSLPolicy:
-    Type: AWS::S3::BucketPolicy
-    Description: Bucket policy to enforce SSL/HTTPS-only access to OpenTelemetry data
-    Properties:
-      Bucket: !Ref Bucket
-      PolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Sid: DenyInsecureConnections
-            Effect: Deny
-            Principal: "*"
-            Action: "s3:*"
-            Resource:
-              - !GetAtt Bucket.Arn
-              - !Sub "${Bucket.Arn}/*"
-            Condition:
-              Bool:
-                "aws:SecureTransport": "false"
-
   LogGroup:
     Type: AWS::Logs::LogGroup
     Description: CloudWatch log group for OpenTelemetry Collector container logs
@@ -271,7 +241,28 @@ Resources:
 
   TaskExecutionRole:
     Type: AWS::IAM::Role
-    Description: IAM role for ECS task execution with permissions for logs and S3 access
+    Description: IAM role for ECS task execution (pulling images, logging)
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Description: IAM role for OpenTelemetry Collector container with S3 export permissions
     Properties:
       AssumeRolePolicyDocument:
         Statement:
@@ -286,24 +277,54 @@ Resources:
         - PolicyDocument:
             Statement:
               - Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Effect: Allow
-                Resource:
-                  - '*'
-          PolicyName: Logs
-        - PolicyDocument:
-            Statement:
-              - Action:
                   - s3:PutObject
                   - s3:PutObjectAcl
                   - s3:GetBucketLocation
                 Effect: Allow
                 Resource:
-                  - !Sub "${Bucket.Arn}/${S3KeyPrefix}*"
-                  - !GetAtt Bucket.Arn
+                  - !Sub "${S3BucketArn}/${S3KeyPrefix}*"
+                  - !Ref S3BucketArn
           PolicyName: S3Export
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
+
+  ExternalAccessS3ReadOnlyPolicy:
+    Type: AWS::IAM::Policy
+    Description: IAM policy granting external read-only access to the OpenTelemetry S3 bucket
+    Properties:
+      PolicyName: OpenTelemetryS3ExternalAccessReadOnly
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetObject
+              - s3:ListBucket
+              - s3:GetObjectVersion
+            Resource:
+              - !Ref S3BucketArn
+              - !Sub "${S3BucketArn}/*"
+      Roles:
+        - !Ref ExternalAccessRole
+
+  ExternalAccessRole:
+    Type: AWS::IAM::Role
+    Description: IAM role for external access to read OpenTelemetry data from S3
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !If [UseCurrentAccount, !Ref AWS::AccountId, !Ref ExternalAccessPrincipal]
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalID
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
@@ -361,19 +382,19 @@ Resources:
                     awss3/traces:
                       s3uploader:
                         region: ${AWS::Region}
-                        s3_bucket: ${S3BucketName}
+                        s3_bucket: ${ExternalS3BucketName}
                         s3_prefix: ${S3KeyPrefix}traces
                         file_prefix: traces
                     awss3/metrics:
                       s3uploader:
                         region: ${AWS::Region}
-                        s3_bucket: ${S3BucketName}
+                        s3_bucket: ${ExternalS3BucketName}
                         s3_prefix: ${S3KeyPrefix}metrics
                         file_prefix: metrics
                     awss3/logs:
                       s3uploader:
                         region: ${AWS::Region}
-                        s3_bucket: ${S3BucketName}
+                        s3_bucket: ${ExternalS3BucketName}
                         s3_prefix: ${S3KeyPrefix}logs
                         file_prefix: logs
 
@@ -391,7 +412,7 @@ Resources:
                         receivers: [otlp]
                         processors: [memory_limiter, batch]
                         exporters: [debug, awss3/logs]
-                - S3BucketName: !Ref Bucket
+                - ExternalS3BucketName: !Select [5, !Split [":", !Ref S3BucketArn]]
                   GRPCPort: !Ref GRPCPort
                   HTTPPort: !Ref HTTPPort
       Cpu: !Ref TaskCpu
@@ -400,7 +421,7 @@ Resources:
       RequiresCompatibilities:
         - FARGATE
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
@@ -462,12 +483,6 @@ Resources:
           Value: "monte-carlo"
 
 Outputs:
-  OpenTelemetryBucketArn:
-    Description: The ARN of the S3 bucket for OpenTelemetry data storage
-    Value: !GetAtt Bucket.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}:OpenTelemetryBucketArn"
-
   OpenTelemetryCollectorGRPCEndpoint:
     Description: The gRPC endpoint for the OpenTelemetry Collector
     Value: !Sub "${LoadBalancer.DNSName}:${GRPCPort}"
@@ -480,6 +495,12 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorHTTPEndpoint"
 
+  ExternalAccessRoleArn:
+    Description: The ARN of the IAM role for external access to the OpenTelemetry S3 bucket
+    Value: !GetAtt ExternalAccessRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}:ExternalAccessRoleArn"
+
 Rules:
   ValidatePortConfiguration:
     Assertions:
@@ -489,5 +510,3 @@ Rules:
                 - Ref: GRPCPort
                 - Ref: HTTPPort
         AssertDescription: GRPCPort and HTTPPort must be different values to avoid conflicts
-
-
