@@ -133,7 +133,6 @@ Conditions:
 Resources:
   LogGroup:
     Type: AWS::Logs::LogGroup
-    Description: CloudWatch log group for OpenTelemetry Collector container logs
     Properties:
       RetentionInDays: 14
       Tags:
@@ -145,7 +144,6 @@ Resources:
   # Network Load Balancer for reliable access from Lambda and other services
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Description: Internal Network Load Balancer for OpenTelemetry Collector endpoints
     Properties:
       Scheme: internal
       Type: network
@@ -159,7 +157,6 @@ Resources:
   # Target groups for OTLP gRPC and HTTP
   TargetGroupGRPC:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Description: Target group for OTLP gRPC protocol traffic to OpenTelemetry Collector
     Properties:
       Port: !Ref GRPCPort
       Protocol: TCP
@@ -180,7 +177,6 @@ Resources:
 
   TargetGroupHTTP:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Description: Target group for OTLP HTTP protocol traffic to OpenTelemetry Collector
     Properties:
       Port: !Ref HTTPPort
       Protocol: TCP
@@ -202,7 +198,6 @@ Resources:
   # NLB Listeners
   ListenerGRPC:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Description: Load balancer listener for OTLP gRPC traffic
     Properties:
       DefaultActions:
         - Type: forward
@@ -213,7 +208,6 @@ Resources:
 
   ListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
-    Description: Load balancer listener for OTLP HTTP traffic
     Properties:
       DefaultActions:
         - Type: forward
@@ -224,7 +218,6 @@ Resources:
 
   EcsCluster:
     Type: AWS::ECS::Cluster
-    Description: ECS cluster for running OpenTelemetry Collector containers
     Properties:
       ClusterSettings:
         - Name: containerInsights
@@ -237,7 +230,6 @@ Resources:
 
   TaskExecutionRole:
     Type: AWS::IAM::Role
-    Description: IAM role for ECS task execution (pulling images, logging)
     Properties:
       AssumeRolePolicyDocument:
         Statement:
@@ -258,7 +250,6 @@ Resources:
 
   TaskRole:
     Type: AWS::IAM::Role
-    Description: IAM role for OpenTelemetry Collector container with S3 export permissions
     Properties:
       AssumeRolePolicyDocument:
         Statement:
@@ -289,7 +280,6 @@ Resources:
 
   ExternalAccessS3ReadOnlyPolicy:
     Type: AWS::IAM::Policy
-    Description: IAM policy granting external read-only access to the OpenTelemetry S3 bucket
     Properties:
       PolicyName: OpenTelemetryS3ExternalAccessReadOnly
       PolicyDocument:
@@ -309,7 +299,6 @@ Resources:
 
   ExternalAccessRole:
     Type: AWS::IAM::Role
-    Description: IAM role for external access to read OpenTelemetry data from S3
     Properties:
       AssumeRolePolicyDocument:
         Version: 2012-10-17
@@ -334,7 +323,6 @@ Resources:
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
-    Description: ECS task definition for OpenTelemetry Collector with configured receivers and exporters
     Properties:
       ContainerDefinitions:
         - Name: otel-collector
@@ -431,7 +419,6 @@ Resources:
 
   EcsService:
     Type: AWS::ECS::Service
-    Description: ECS service to run and maintain OpenTelemetry Collector tasks
     DependsOn:
       - ListenerGRPC
       - ListenerHTTP
@@ -462,7 +449,6 @@ Resources:
 
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    Description: Security group allowing inbound access to OpenTelemetry Collector ports
     Properties:
       GroupDescription: Security group for OpenTelemetry Collector containers
       VpcId: !Ref ExistingVpcId

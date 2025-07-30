@@ -82,7 +82,6 @@ Resources:
       TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/basic_vpc.yaml
   Agent:
     Type: AWS::CloudFormation::Stack
-    DependsOn: [DataStore, Networking]
     Properties:
       TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
       Parameters:
@@ -95,7 +94,6 @@ Resources:
         DataStoreStorageArn: !Sub 'arn:aws:s3:::${DataStore.Outputs.ObjectStoreBucketName}'
   TelemetryCollector:
     Type: AWS::CloudFormation::Stack
-    DependsOn: [Networking, Agent]
     Properties:
       TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/aws_otel_collector_ecs.yaml
       Parameters:

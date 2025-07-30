@@ -84,7 +84,6 @@ Resources:
         TelemetryCollectorExternalNotificationChannelArn: !Ref TelemetryCollectorExternalNotificationChannelArn
   Agent:
     Type: AWS::CloudFormation::Stack
-    DependsOn: [DataStore]
     Properties:
       TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
       Parameters:
