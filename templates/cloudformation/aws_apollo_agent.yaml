@@ -34,7 +34,7 @@ Metadata:
       - Label:
           default: Storage Configuration
         Parameters:
-          - ExternalStorageArn
+          - DataStoreStorageArn
       - Label:
           default: Advanced Configuration
         Parameters:
@@ -106,7 +106,7 @@ Parameters:
     Type: Number
   DataStoreStorageArn:
     Description: >
-      ARN of an existing Data StoreS3 bucket to use for agent storage.
+      ARN of an existing Data Store S3 bucket to use for agent storage.
     Type: String
 Outputs:
   FunctionArn:
