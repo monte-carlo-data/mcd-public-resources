@@ -28,22 +28,17 @@ Metadata:
 Parameters:
   ExistingVpcId:
     AllowedPattern: '^(vpc[e]?-[0-9a-f]*)$'
-    Description: VPC ID to deploy the OpenTelemetry Collector into. Required for ECS Fargate deployment.
+    Description: VPC ID to deploy the OpenTelemetry Collector into.
     Type: String
 
   ExistingSubnetIds:
     Description: >
-      Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector. Required for ECS Fargate deployment.
+      Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
     Type: CommaDelimitedList
 
   S3BucketArn:
     Description: ARN of the S3 bucket to store OpenTelemetry data. Provided by the parent stack.
     Type: String
-
-  S3KeyPrefix:
-    Description: The S3 key prefix for telemetry data
-    Type: String
-    Default: "mcd-otel-collector/"
 
   GRPCPort:
     Description: Port for OTLP gRPC receiver
@@ -121,18 +116,19 @@ Parameters:
     Default: "000"
 
   ExternalAccessPrincipal:
-    Description: AWS Principal (ARN or account ID) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
+    Description: Principal (AWS ARN/account ID or Federated identifier) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
     Type: String
     Default: ""
 
-  ExternalNotificationChannelArn:
-    Description: SQS Queue ARN to receive S3 event notifications. If left empty, no notifications will be configured. Update this value later after the CF stack is created.
+  ExternalAccessPrincipalType:
+    Description: Type of principal for external access role
     Type: String
-    Default: ""
+    Default: "AWS"
+    AllowedValues: ["AWS", "Federated"]
 
 Conditions:
   UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, ""]
-  EnableS3Notifications: !Not [!Equals [!Ref ExternalNotificationChannelArn, ""]]
+  UseAWSPrincipal: !Equals [!Ref ExternalAccessPrincipalType, "AWS"]
 
 Resources:
   LogGroup:
@@ -282,7 +278,7 @@ Resources:
                   - s3:GetBucketLocation
                 Effect: Allow
                 Resource:
-                  - !Sub "${S3BucketArn}/${S3KeyPrefix}*"
+                  - !Sub "${S3BucketArn}/mcd-otel-collector/*"
                   - !Ref S3BucketArn
           PolicyName: S3Export
       Tags:
@@ -319,8 +315,13 @@ Resources:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
-            Principal:
-              AWS: !If [UseCurrentAccount, !Ref AWS::AccountId, !Ref ExternalAccessPrincipal]
+            Principal: !If
+              - UseCurrentAccount
+              - AWS: !Ref AWS::AccountId
+              - !If
+                - UseAWSPrincipal
+                - AWS: !Ref ExternalAccessPrincipal
+                - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
               StringEquals:
@@ -383,19 +384,19 @@ Resources:
                       s3uploader:
                         region: ${AWS::Region}
                         s3_bucket: ${ExternalS3BucketName}
-                        s3_prefix: ${S3KeyPrefix}traces
+                        s3_prefix: mcd-otel-collector/traces
                         file_prefix: traces
                     awss3/metrics:
                       s3uploader:
                         region: ${AWS::Region}
                         s3_bucket: ${ExternalS3BucketName}
-                        s3_prefix: ${S3KeyPrefix}metrics
+                        s3_prefix: mcd-otel-collector/metrics
                         file_prefix: metrics
                     awss3/logs:
                       s3uploader:
                         region: ${AWS::Region}
                         s3_bucket: ${ExternalS3BucketName}
-                        s3_prefix: ${S3KeyPrefix}logs
+                        s3_prefix: mcd-otel-collector/logs
                         file_prefix: logs
 
                   service:
