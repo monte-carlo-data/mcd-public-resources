@@ -36,10 +36,17 @@ Parameters:
       please contact your Monte Carlo representative for the ID.
     Type: String
     Default: 590183797493
+  TelemetryCollectorExternalNotificationChannelArn:
+    Default: ''
+    Description: >
+      Optional SQS queue ARN to receive notifications when objects are created or removed from the 
+      mcd-otel-collector directory. If not provided, no notifications will be sent.
+    Type: String
 Conditions:
   ShouldSkipCloudAccountPolicy: !Equals
     - !Ref 'MonteCarloCloudAccountId'
     - '590183797493'
+  ShouldConfigureNotifications: !Not [ !Equals [ !Ref TelemetryCollectorExternalNotificationChannelArn, '' ] ]
 Resources:
   ObjectStoreBucket:
     Properties:
@@ -63,6 +70,9 @@ Resources:
           - ExpirationInDays: 90
             Prefix: 'idempotent/'
             Status: Enabled
+          - ExpirationInDays: 30
+            Prefix: 'mcd-otel-collector/'
+            Status: Enabled
       # CORS configuration required for access through pre-signed URLs from the browser
       CorsConfiguration:
         CorsRules:
@@ -74,6 +84,25 @@ Resources:
               - 'https://getmontecarlo.com'
               - 'https://*.getmontecarlo.com'
             MaxAge: 3000
+      # SQS notification configuration for telemetry collector
+      NotificationConfiguration: !If
+        - ShouldConfigureNotifications
+        - QueueConfigurations:
+            - Event: s3:ObjectCreated:*
+              Queue: !Ref TelemetryCollectorExternalNotificationChannelArn
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: prefix
+                      Value: mcd-otel-collector/
+            - Event: s3:ObjectRemoved:*
+              Queue: !Ref TelemetryCollectorExternalNotificationChannelArn
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: prefix
+                      Value: mcd-otel-collector/
+        - !Ref AWS::NoValue
     Type: AWS::S3::Bucket
   ObjectStoreRole:
     Properties:
