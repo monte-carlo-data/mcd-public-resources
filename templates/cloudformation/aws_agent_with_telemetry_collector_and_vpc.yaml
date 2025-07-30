@@ -72,18 +72,18 @@ Resources:
   DataStore:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/aws_data_store.yaml
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_data_store.yaml
       Parameters:
         MonteCarloCloudAccountId: !Ref MonteCarloCloudAccountId
         TelemetryCollectorExternalNotificationChannelArn: !Ref TelemetryCollectorExternalNotificationChannelArn
   Networking:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/basic_vpc.yaml
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/basic_vpc.yaml
   Agent:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
       Parameters:
         CloudAccountId: !Ref MonteCarloCloudAccountId
         ConcurrentExecutions: !Ref ConcurrentExecutions
@@ -95,7 +95,7 @@ Resources:
   TelemetryCollector:
     Type: AWS::CloudFormation::Stack
     Properties:
-      TemplateURL: https://mcd-dev-public-resources.s3.amazonaws.com/cloudformation/aws_otel_collector_ecs.yaml
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_otel_collector_ecs.yaml
       Parameters:
         ExistingVpcId: !GetAtt Networking.Outputs.VpcId
         ExistingSubnetIds: !Join [ ',', [ !GetAtt Networking.Outputs.PrivateSubnetAz1, !GetAtt Networking.Outputs.PrivateSubnetAz2 ] ]
