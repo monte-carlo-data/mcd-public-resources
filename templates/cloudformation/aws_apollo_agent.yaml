@@ -34,7 +34,7 @@ Metadata:
       - Label:
           default: Storage Configuration
         Parameters:
-          - DataStoreStorageArn
+          - ExistingStorageArn
       - Label:
           default: Advanced Configuration
         Parameters:
@@ -57,7 +57,7 @@ Metadata:
         default: Select the agent image source
       MemorySize:
         default: Set agent memory
-      DataStoreStorageArn:
+      ExistingStorageArn:
         default: Data Store S3 bucket ARN for storage
 Parameters:
   CloudAccountId:
@@ -104,9 +104,10 @@ Parameters:
     MinValue: 256
     MaxValue: 10240
     Type: Number
-  DataStoreStorageArn:
+  ExistingStorageArn:
     Description: >
-      ARN of an existing Data Store S3 bucket to use for agent storage.
+      Optionally use existing S3 bucket for the agent. If not specified new bucket will be created.
+      NOTE: We strongly recommend that you do not share storage accounts with other jobs, as Monte Carlo might overwrite existing data.
     Type: String
 Outputs:
   FunctionArn:
@@ -124,7 +125,7 @@ Outputs:
     Value: !Ref SecurityGroup
   StorageArn:
     Description: Storage bucket ARN.
-    Value: !Ref DataStoreStorageArn
+    Value: !Ref ExistingStorageArn
 Conditions:
   ShouldCreateUpdatePolicy: !Equals
     - !Ref EnableRemoteUpdates
@@ -163,7 +164,7 @@ Resources:
               - !Ref 'AWS::Region'
               - !Select [ 1, !Split [ '*', !Ref ImageUri ] ]
           MCD_AGENT_CLOUD_PLATFORM: AWS
-          MCD_STORAGE_BUCKET_NAME: !Select [5, !Split [':', !Ref DataStoreStorageArn]]
+          MCD_STORAGE_BUCKET_NAME: !Select [5, !Split [':', !Ref ExistingStorageArn]]
           MCD_AGENT_IS_REMOTE_UPGRADABLE: !If [ ShouldCreateUpdatePolicy, True, False ]
           MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
           MCD_AGENT_WRAPPER_VERSION: 1.0.1
@@ -214,8 +215,8 @@ Resources:
                   - s3:GetBucketAcl
                 Effect: Allow
                 Resource:
-                  - !Ref DataStoreStorageArn
-                  - !Sub '${DataStoreStorageArn}/*'
+                  - !Ref ExistingStorageArn
+                  - !Sub '${ExistingStorageArn}/*'
           PolicyName: S3Policy
         - PolicyDocument:
             Version: 2012-10-17

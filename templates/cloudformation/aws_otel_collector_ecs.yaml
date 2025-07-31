@@ -298,6 +298,8 @@ Resources:
         - !Ref ExternalAccessRole
 
   ExternalAccessRole:
+    # This role is used to access the S3 bucket containing the telemetry data
+    # by an external warehouse, such as Snowflake.
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:

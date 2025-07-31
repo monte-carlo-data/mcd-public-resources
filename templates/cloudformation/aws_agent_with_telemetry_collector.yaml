@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Sample template that deploys an agent with a connected VPC by leveraging nested stacks.
+Description: Sample template that deploys a Monte Carlo Agent, Data Store, and Telemetry Collector.
 Metadata:
   License: >
     Copyright 2023 Monte Carlo Data, Inc.
@@ -23,6 +23,12 @@ Metadata:
     or demonstrably anticipates conducting, at any time; or (v) seek any patent or other intellectual property rights or
     protections over or in connection with any Software of Derivatives.
 Parameters:
+  ExistingVpcId:
+    Description: The VPC ID where the agent and telemetry collector will be deployed
+    Type: AWS::EC2::VPC::Id
+  ExistingSubnetIds:
+    Description: List of subnet IDs where the agent and telemetry collector will be deployed (should be private subnets)
+    Type: List<AWS::EC2::Subnet::Id>
   MonteCarloCloudAccountId:
     Description: >
       For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, 
@@ -30,19 +36,19 @@ Parameters:
       please contact your Monte Carlo representative for the ID.
     Type: String
     Default: 590183797493
-  ConcurrentExecutions:
+  AgentConcurrentExecutions:
     Default: 20
     Description: The number of concurrent lambda executions for the agent.
     MaxValue: 200
     MinValue: 0
     Type: Number
-  ImageUri:
+  AgentImageUri:
     Default: 590183797493.dkr.ecr.*.amazonaws.com/mcd-agent:latest
     Description: >
       URI of the Agent container image (ECR Repo). Note that the region automatically maps to where this stack 
       is deployed in.
     Type: String
-  MemorySize:
+  AgentMemorySize:
     Default: 512
     Description: >
       The amount of memory (MB) available to the agent at runtime; this value can be any multiple of 
@@ -50,12 +56,6 @@ Parameters:
     MinValue: 256
     MaxValue: 10240
     Type: Number
-  ExistingVpcId:
-    Description: The VPC ID where the agent and telemetry collector will be deployed
-    Type: AWS::EC2::VPC::Id
-  ExistingSubnetIds:
-    Description: List of subnet IDs where the agent and telemetry collector will be deployed (should be private subnets)
-    Type: List<AWS::EC2::Subnet::Id>
   TelemetryCollectorExternalID:
     Description: External ID for telemetry collector S3 access. Update this value later after the CF stack is created.
     Type: String
@@ -88,12 +88,12 @@ Resources:
       TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
       Parameters:
         CloudAccountId: !Ref MonteCarloCloudAccountId
-        ConcurrentExecutions: !Ref ConcurrentExecutions
+        ConcurrentExecutions: !Ref AgentConcurrentExecutions
         ExistingVpcId: !Ref ExistingVpcId
         ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
-        ImageUri: !Ref ImageUri
-        MemorySize: !Ref MemorySize
-        DataStoreStorageArn: !Sub 'arn:aws:s3:::${DataStore.Outputs.ObjectStoreBucketName}'
+        ImageUri: !Ref AgentImageUri
+        MemorySize: !Ref AgentMemorySize
+        ExistingStorageArn: !Sub 'arn:aws:s3:::${DataStore.Outputs.ObjectStoreBucketName}'
   TelemetryCollector:
     Type: AWS::CloudFormation::Stack
     DependsOn: [Agent]
