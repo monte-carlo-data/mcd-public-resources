@@ -33,6 +33,11 @@ Parameters:
     Description: >
       Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
     Type: CommaDelimitedList
+  ExistingVpcAllowedCidrBlock:
+    Description: CIDR block allowed to access the OpenTelemetry Collector endpoints
+    Type: String
+    Default: "10.0.0.0/8"
+    AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$'
   TelemetryDataBucketArn:
     Description: ARN of the S3 bucket to store OpenTelemetry data such as traces, metrics, and logs.
     Type: String
@@ -90,11 +95,6 @@ Parameters:
     Default: 512
     MinValue: 256
     MaxValue: 2048
-  AllowedCidrBlock:
-    Description: CIDR block allowed to access the OpenTelemetry Collector endpoints
-    Type: String
-    Default: "10.0.0.0/8"
-    AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$'
   ExternalID:
     Description: External ID to access the S3 bucket. Update this value later after the CF stack is created.
     Type: String
@@ -424,12 +424,12 @@ Resources:
         - IpProtocol: tcp
           FromPort: !Ref GRPCPort
           ToPort: !Ref GRPCPort
-          CidrIp: !Ref AllowedCidrBlock
+          CidrIp: !Ref ExistingVpcAllowedCidrBlock
           Description: Allow OTLP gRPC from specified CIDR block (via NLB)
         - IpProtocol: tcp
           FromPort: !Ref HTTPPort
           ToPort: !Ref HTTPPort
-          CidrIp: !Ref AllowedCidrBlock
+          CidrIp: !Ref ExistingVpcAllowedCidrBlock
           Description: Allow OTLP HTTP from specified CIDR block (via NLB)
       Tags:
         - Key: Service
