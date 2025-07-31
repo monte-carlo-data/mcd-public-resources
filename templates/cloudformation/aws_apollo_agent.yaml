@@ -55,7 +55,7 @@ Metadata:
       MemorySize:
         default: Set agent memory
       ExistingStorageArn:
-        default: Data Store S3 bucket ARN for storage
+        default: Data Store S3 bucket ARN for agent storage
 Parameters:
   CloudAccountId:
     Description: >
