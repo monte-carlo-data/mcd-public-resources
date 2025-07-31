@@ -73,15 +73,61 @@ Parameters:
     Description: SQS Queue ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the CF stack is created.
     Type: String
     Default: ""
-
 Resources:
-  DataStore:
-    Type: AWS::CloudFormation::Stack
+  Storage:
     Properties:
-      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_data_store.yaml
-      Parameters:
-        MonteCarloCloudAccountId: !Ref MonteCarloCloudAccountId
-        TelemetryCollectorExternalNotificationChannelArn: !Ref TelemetryCollectorExternalNotificationChannelArn
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 90
+            Prefix: 'mcd/'
+            Status: Enabled
+          - ExpirationInDays: 2
+            Prefix: 'mcd/responses/'
+            Status: Enabled
+          - ExpirationInDays: 30
+            Prefix: 'mcd/otel-collector/'
+            Status: Enabled
+      # CORS configuration required for access through pre-signed URLs from the browser
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - 'https://getmontecarlo.com'
+              - 'https://*.getmontecarlo.com'
+            MaxAge: 3000
+    Type: AWS::S3::Bucket
+  StorageSSLPolicy:
+    Properties:
+      Bucket: !Ref Storage
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyActionsWithoutSSL
+            Effect: Deny
+            Principal:
+              AWS: '*'
+            Action:
+              - '*'
+            Resource:
+              - !GetAtt Storage.Arn
+              - !Sub '${Storage.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport:
+                  - false
+    Type: AWS::S3::BucketPolicy
   Agent:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -93,7 +139,7 @@ Resources:
         ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
         ImageUri: !Ref AgentImageUri
         MemorySize: !Ref AgentMemorySize
-        ExistingStorageArn: !Sub 'arn:aws:s3:::${DataStore.Outputs.ObjectStoreBucketName}'
+        ExistingStorageArn: !Sub 'arn:aws:s3:::${Storage.Outputs.ObjectStoreBucketName}'
   TelemetryCollector:
     Type: AWS::CloudFormation::Stack
     DependsOn: [Agent]
@@ -102,7 +148,7 @@ Resources:
       Parameters:
         ExistingVpcId: !Ref ExistingVpcId
         ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
-        S3BucketArn: !Sub 'arn:aws:s3:::${DataStore.Outputs.ObjectStoreBucketName}'
+        TelemetryDataBucketArn: !Sub 'arn:aws:s3:::${Storage.Outputs.ObjectStoreBucketName}'
         ExternalID: !Ref TelemetryCollectorExternalID
         ExternalAccessPrincipal: !Ref TelemetryCollectorExternalAccessPrincipal
         ExternalAccessPrincipalType: !Ref TelemetryCollectorExternalPrincipalType
@@ -127,10 +173,10 @@ Outputs:
     Value: !GetAtt TelemetryCollector.Outputs.ExternalAccessRoleArn
   ObjectStoreBucketName:
     Description: Name of the S3 bucket created by the data store stack
-    Value: !GetAtt DataStore.Outputs.ObjectStoreBucketName
+    Value: !GetAtt Storage.Outputs.ObjectStoreBucketName
   ObjectStoreRoleArn:
     Description: ARN for the assumable role to access the object store
-    Value: !GetAtt DataStore.Outputs.ObjectStoreRoleArn
+    Value: !GetAtt Storage.Outputs.ObjectStoreRoleArn
   ObjectStoreRoleExternalId:
     Description: External ID for the assumable role to access the object store
-    Value: !GetAtt DataStore.Outputs.ObjectStoreRoleExternalId
+    Value: !GetAtt Storage.Outputs.ObjectStoreRoleExternalId
