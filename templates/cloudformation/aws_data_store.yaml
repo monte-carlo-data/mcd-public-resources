@@ -40,7 +40,6 @@ Conditions:
   ShouldSkipCloudAccountPolicy: !Equals
     - !Ref 'MonteCarloCloudAccountId'
     - '590183797493'
-  ShouldConfigureNotifications: !Not [ !Equals [ !Ref TelemetryCollectorExternalNotificationChannelArn, '' ] ]
 Resources:
   ObjectStoreBucket:
     Properties:
