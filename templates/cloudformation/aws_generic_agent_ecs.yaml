@@ -27,36 +27,29 @@ Parameters:
   VpcSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: 'The Subnet IDs for the ECS Service'
-
   SecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: 'The Security Group ID for the ECS Service'
-
   VpcId:
     # Monte Carlo recommends a VPC with endpoints for S3 and CloudWatch Logs
     Type: AWS::EC2::VPC::Id
     Description: 'The VPC ID for the ECS Service'
-
   ContainerPort:
     Type: Number
     Description: 'The port for the ECS Service'
     Default: 8081
-
   TaskDefinitionCpu:
     Type: Number
     Description: 'The CPU for the ECS Service'
     Default: 2048
-
   TaskDefinitionMemory:
     Type: Number
     Description: 'The Memory for the ECS Service'
     Default: 6144
-
   TaskDefinitionImage:
     Type: String
     Description: 'The Monte Carlo Agent Docker image for the ECS Service'
     Default: 'docker.io/montecarlodata/agent:latest-aws-generic'
-
 Resources:
   LogGroup:
     Type: 'AWS::Logs::LogGroup'
@@ -65,14 +58,12 @@ Resources:
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
-
   EcsCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
-
   EcsTaskDefinition:
     Type: 'AWS::ECS::TaskDefinition'
     Properties:
@@ -126,7 +117,6 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref "AWS::Region"
               awslogs-stream-prefix: mc-agent
-
   LoadBalancer:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
     Properties:
@@ -137,7 +127,6 @@ Resources:
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
-
   TargetGroup:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     Properties:
@@ -153,7 +142,6 @@ Resources:
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
-
   Listener:
     Type: 'AWS::ElasticLoadBalancingV2::Listener'
     Properties:
@@ -163,7 +151,6 @@ Resources:
       DefaultActions:
         - Type: 'forward'
           TargetGroupArn: !Ref TargetGroup
-
   EcsService:
     Type: 'AWS::ECS::Service'
     DependsOn: 
@@ -186,7 +173,6 @@ Resources:
       Tags:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
-
   Storage:
     Properties:
       Tags:
@@ -210,7 +196,6 @@ Resources:
             Prefix: 'mcd/responses/'
             Status: Enabled
     Type: AWS::S3::Bucket
-
   StorageSSLPolicy:
     Properties:
       Bucket: !Ref Storage
@@ -231,7 +216,6 @@ Resources:
                 aws:SecureTransport:
                   - false
     Type: AWS::S3::BucketPolicy
-
   EcsTaskRole:
     Type: 'AWS::IAM::Role'
     Properties:

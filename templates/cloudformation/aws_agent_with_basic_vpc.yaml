@@ -68,12 +68,6 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/basic_vpc.yaml
-  DataStore:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_data_store.yaml
-      Parameters:
-        MonteCarloCloudAccountId: !Ref CloudAccountId
   Agent:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -85,4 +79,3 @@ Resources:
         ExistingSubnetIds: !Join [ ',', [ !GetAtt Networking.Outputs.PrivateSubnetAz1, !GetAtt Networking.Outputs.PrivateSubnetAz2 ] ]
         ImageUri: !Ref ImageUri
         MemorySize: !Ref MemorySize
-        DataStoreStorageArn: !Sub 'arn:aws:s3:::${DataStore.Outputs.ObjectStoreBucketName}'
