@@ -33,8 +33,8 @@ Parameters:
     Description: >
       Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
     Type: CommaDelimitedList
-  S3BucketArn:
-    Description: ARN of the S3 bucket to store OpenTelemetry data. Provided by the parent stack.
+  TelemetryDataBucketArn:
+    Description: ARN of the S3 bucket to store OpenTelemetry data such as traces, metrics, and logs.
     Type: String
   GRPCPort:
     Description: Port for OTLP gRPC receiver
@@ -240,8 +240,8 @@ Resources:
                   - s3:GetBucketLocation
                 Effect: Allow
                 Resource:
-                  - !Sub "${S3BucketArn}/mcd-otel-collector/*"
-                  - !Ref S3BucketArn
+                  - !Sub "${TelemetryDataBucketArn}/mcd-otel-collector/*"
+                  - !Ref TelemetryDataBucketArn
           PolicyName: S3Export
       Tags:
         - Key: Service
@@ -262,8 +262,8 @@ Resources:
               - s3:ListBucket
               - s3:GetObjectVersion
             Resource:
-              - !Ref S3BucketArn
-              - !Sub "${S3BucketArn}/*"
+              - !Ref TelemetryDataBucketArn
+              - !Sub "${TelemetryDataBucketArn}/*"
       Roles:
         - !Ref ExternalAccessRole
   ExternalAccessRole:
@@ -371,7 +371,7 @@ Resources:
                         receivers: [otlp]
                         processors: [memory_limiter, batch]
                         exporters: [debug, awss3/logs]
-                - ExternalS3BucketName: !Select [5, !Split [":", !Ref S3BucketArn]]
+                - ExternalS3BucketName: !Select [5, !Split [":", !Ref TelemetryDataBucketArn]]
                   GRPCPort: !Ref GRPCPort
                   HTTPPort: !Ref HTTPPort
       Cpu: !Ref TaskCpu
