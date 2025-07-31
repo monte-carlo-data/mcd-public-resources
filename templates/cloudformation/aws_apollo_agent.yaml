@@ -122,7 +122,7 @@ Outputs:
     Value: !Ref SecurityGroup
   StorageArn:
     Description: Storage bucket ARN.
-    Value: !If [ ShouldUseExistingStorage, !Ref ExistingStorageArn, !Ref Storage.Arn ]
+    Value: !If [ ShouldUseExistingStorage, !Ref ExistingStorageArn, !GetAtt Storage.Arn ]
 Conditions:
   ShouldCreateUpdatePolicy: !Equals
     - !Ref EnableRemoteUpdates
@@ -136,9 +136,10 @@ Conditions:
     - !Ref 'CloudAccountId'
     - '590183797493'
   ShouldUseExistingStorage: !Not [ !Equals [ !Ref ExistingStorageArn, '' ] ]
+  ShouldCreateStorage: !Equals [ !Ref ExistingStorageArn, '' ]
 Resources:
   Storage:
-    Condition: !Not [ !Ref ShouldUseExistingStorage ]
+    Condition: ShouldCreateStorage
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
@@ -170,6 +171,7 @@ Resources:
             MaxAge: 3000
     Type: AWS::S3::Bucket
   StorageSSLPolicy:
+    Condition: ShouldCreateStorage
     Properties:
       Bucket: !Ref Storage
       PolicyDocument:
@@ -265,7 +267,7 @@ Resources:
                   - s3:GetBucketAcl
                 Effect: Allow
                 Resource:
-                  - !If [ ShouldUseExistingStorage, !Ref ExistingStorageArn, !Ref Storage.Arn ]
+                  - !If [ ShouldUseExistingStorage, !Ref ExistingStorageArn, !GetAtt Storage.Arn ]
                   - !If [ ShouldUseExistingStorage, !Sub '${ExistingStorageArn}/*', !Sub '${Storage.Arn}/*' ]
           PolicyName: S3Policy
         - PolicyDocument:

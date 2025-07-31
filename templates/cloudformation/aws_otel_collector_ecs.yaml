@@ -102,7 +102,7 @@ Parameters:
   ExternalAccessPrincipal:
     Description: Principal (AWS ARN/account ID or Federated identifier) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
     Type: String
-    Default: ""=
+    Default: ""
   ExternalAccessPrincipalType:
     Description: Type of principal for external access role
     Type: String
