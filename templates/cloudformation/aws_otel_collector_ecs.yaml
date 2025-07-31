@@ -24,112 +24,93 @@ Metadata:
     which competes, or is reasonably likely to compete, with any business that Licensor conducts, proposes to conduct
     or demonstrably anticipates conducting, at any time; or (v) seek any patent or other intellectual property rights or
     protections over or in connection with any Software of Derivatives.
-
 Parameters:
   ExistingVpcId:
     AllowedPattern: '^(vpc[e]?-[0-9a-f]*)$'
     Description: VPC ID to deploy the OpenTelemetry Collector into.
     Type: String
-
   ExistingSubnetIds:
     Description: >
       Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
     Type: CommaDelimitedList
-
   S3BucketArn:
     Description: ARN of the S3 bucket to store OpenTelemetry data. Provided by the parent stack.
     Type: String
-
   GRPCPort:
     Description: Port for OTLP gRPC receiver
     Type: Number
     Default: 4317
     MinValue: 1024
     MaxValue: 65535
-
   HTTPPort:
     Description: Port for OTLP HTTP receiver
     Type: Number
     Default: 4318
     MinValue: 1024
     MaxValue: 65535
-
   TaskDesiredCount:
     Description: Desired number of running tasks for the OpenTelemetry Collector service
     Type: Number
     Default: 2
     MinValue: 1
     MaxValue: 10
-
   TaskCpu:
     Description: CPU units for the task (1024 = 1 vCPU)
     Type: Number
     Default: 1024
     AllowedValues: [256, 512, 1024, 2048, 4096]
-
   TaskMemory:
     Description: Memory for the task in MB
     Type: Number
     Default: 2048
     AllowedValues: [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
-
   ContainerImage:
     Description: OpenTelemetry Collector container image
     Type: String
     Default: "otel/opentelemetry-collector-contrib:latest"
-
   BatchTimeout:
     Description: Timeout for batch processor in seconds
     Type: String
     Default: "10s"
-
   BatchSize:
     Description: Batch size for sending telemetry data
     Type: Number
     Default: 1024
     MinValue: 100
     MaxValue: 10000
-
   MemoryLimitMiB:
     Description: Memory limit for the collector in MiB
     Type: Number
     Default: 1500
     MinValue: 512
     MaxValue: 4096
-
   MemorySpikeLimitMiB:
     Description: Memory spike limit for the collector in MiB
     Type: Number
     Default: 512
     MinValue: 256
     MaxValue: 2048
-
   AllowedCidrBlock:
     Description: CIDR block allowed to access the OpenTelemetry Collector endpoints
     Type: String
     Default: "10.0.0.0/8"
     AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$'
-
   ExternalID:
     Description: External ID to access the S3 bucket. Update this value later after the CF stack is created.
     Type: String
     Default: "000"
-
   ExternalAccessPrincipal:
     Description: Principal (AWS ARN/account ID or Federated identifier) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
     Type: String
-    Default: ""
-
+    Default: ""=
   ExternalAccessPrincipalType:
     Description: Type of principal for external access role
     Type: String
     Default: "AWS"
     AllowedValues: ["AWS", "Federated"]
-
 Conditions:
   UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, ""]
   UseAWSPrincipal: !Equals [!Ref ExternalAccessPrincipalType, "AWS"]
-
 Resources:
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -140,8 +121,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
-  # Network Load Balancer for reliable access from Lambda and other services
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -153,8 +132,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
-  # Target groups for OTLP gRPC and HTTP
   TargetGroupGRPC:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -174,7 +151,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   TargetGroupHTTP:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -194,8 +170,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
-  # NLB Listeners
   ListenerGRPC:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -215,7 +189,6 @@ Resources:
       LoadBalancerArn: !Ref LoadBalancer
       Port: !Ref HTTPPort
       Protocol: TCP
-
   EcsCluster:
     Type: AWS::ECS::Cluster
     Properties:
@@ -227,7 +200,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -247,7 +219,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -277,7 +248,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   ExternalAccessS3ReadOnlyPolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -296,7 +266,6 @@ Resources:
               - !Sub "${S3BucketArn}/*"
       Roles:
         - !Ref ExternalAccessRole
-
   ExternalAccessRole:
     # This role is used to access the S3 bucket containing the telemetry data
     # by an external warehouse, such as Snowflake.
@@ -322,7 +291,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -418,7 +386,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   EcsService:
     Type: AWS::ECS::Service
     DependsOn:
@@ -448,7 +415,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -470,26 +436,22 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-
 Outputs:
   OpenTelemetryCollectorGRPCEndpoint:
     Description: The gRPC endpoint for the OpenTelemetry Collector
     Value: !Sub "${LoadBalancer.DNSName}:${GRPCPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorGRPCEndpoint"
-
   OpenTelemetryCollectorHTTPEndpoint:
     Description: The HTTP endpoint for the OpenTelemetry Collector
     Value: !Sub "http://${LoadBalancer.DNSName}:${HTTPPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorHTTPEndpoint"
-
   ExternalAccessRoleArn:
     Description: The ARN of the IAM role for external access to the OpenTelemetry S3 bucket
     Value: !GetAtt ExternalAccessRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}:ExternalAccessRoleArn"
-
 Rules:
   ValidatePortConfiguration:
     Assertions:
