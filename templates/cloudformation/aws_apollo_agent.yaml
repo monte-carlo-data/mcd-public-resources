@@ -32,16 +32,13 @@ Metadata:
           - ExistingVpcId
           - ExistingSubnetIds
       - Label:
-          default: Storage Configuration
-        Parameters:
-          - ExistingStorageArn
-      - Label:
           default: Advanced Configuration
         Parameters:
           - EnableRemoteUpdates
           - ImageUri
           - MemorySize
           - ConcurrentExecutions
+          - ExistingStorageArn
     ParameterLabels:
       CloudAccountId:
         default: Select a Monte Carlo AWS Account ID
