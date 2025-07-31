@@ -41,6 +41,8 @@ Parameters:
       please contact your Monte Carlo representative for the ID.
     Type: String
     Default: 590183797493
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a valid 12-digit AWS account ID
   AgentConcurrentExecutions:
     Default: 20
     Description: The number of concurrent lambda executions for the agent.
@@ -74,10 +76,16 @@ Parameters:
     Description: AWS Principal (ARN or account ID) allowed to assume the telemetry collector external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
     Type: String
     Default: ""
+    AllowedPattern: '^(|[0-9]{12}|arn:aws:.*:.*)$'
+    ConstraintDescription: Must be either empty, a 12-digit AWS account ID, or a valid AWS ARN
   OpenTelemetryCollectorExternalNotificationChannelArn:
     Description: SQS Queue ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the CF stack is created.
     Type: String
     Default: ""
+    AllowedPattern: '^(|arn:aws:sqs:[^:]+:[0-9]{12}:[^:]+)$'
+    ConstraintDescription: Must be either empty or a valid SQS ARN (arn:aws:sqs:region:account:queue-name)
+Conditions:
+  HasNotificationChannel: !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, ""]]
 Resources:
   Storage:
     Properties:
@@ -101,6 +109,24 @@ Resources:
           - ExpirationInDays: 30
             Prefix: 'mcd/otel-collector/'
             Status: Enabled
+      NotificationConfiguration: !If
+        - HasNotificationChannel
+        - QueueConfigurations:
+            - Event: s3:ObjectCreated:*
+              Queue: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: prefix
+                      Value: mcd/otel-collector/
+            - Event: s3:ObjectRemoved:*
+              Queue: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+              Filter:
+                S3Key:
+                  Rules:
+                    - Name: prefix
+                      Value: mcd/otel-collector/
+        - !Ref AWS::NoValue
     Type: AWS::S3::Bucket
   StorageSSLPolicy:
     Properties:
@@ -147,7 +173,6 @@ Resources:
         ExternalID: !Ref OpenTelemetryCollectorExternalID
         ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
         ExternalAccessPrincipalType: !Ref OpenTelemetryCollectorExternalPrincipalType
-        ExternalAccessNotificationChannelArn: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
 Outputs:
   StorageBucketName:
     Description: Name of the S3 bucket
