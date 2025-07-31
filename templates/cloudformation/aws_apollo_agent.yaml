@@ -125,7 +125,7 @@ Outputs:
     Value: !Ref SecurityGroup
   StorageArn:
     Description: Storage bucket ARN.
-    Value: !Ref ExistingStorageArn
+    Value: !If [ ShouldUseExistingStorage, !Ref ExistingStorageArn, !Ref Storage.Arn ]
 Conditions:
   ShouldCreateUpdatePolicy: !Equals
     - !Ref EnableRemoteUpdates
@@ -138,7 +138,60 @@ Conditions:
   ShouldSkipCloudAccountPolicy: !Equals
     - !Ref 'CloudAccountId'
     - '590183797493'
+  ShouldUseExistingStorage: !Not [ !Equals [ !Ref ExistingStorageArn, '' ] ]
 Resources:
+  Storage:
+    Condition: !Not [ !Ref ShouldUseExistingStorage ]
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 90
+            Prefix: 'mcd/'
+            Status: Enabled
+          - ExpirationInDays: 2
+            Prefix: 'mcd/responses/'
+            Status: Enabled
+      # CORS configuration required for access through pre-signed URLs from the browser
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - 'https://getmontecarlo.com'
+              - 'https://*.getmontecarlo.com'
+            MaxAge: 3000
+    Type: AWS::S3::Bucket
+  StorageSSLPolicy:
+    Properties:
+      Bucket: !Ref Storage
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyActionsWithoutSSL
+            Effect: Deny
+            Principal:
+              AWS: '*'
+            Action:
+              - '*'
+            Resource:
+              - !GetAtt Storage.Arn
+              - !Sub '${Storage.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport:
+                  - false
+    Type: AWS::S3::BucketPolicy
   LogGroup:
     Properties:
       LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-AgentLambda'
