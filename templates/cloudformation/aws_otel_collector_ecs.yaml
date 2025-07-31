@@ -240,7 +240,7 @@ Resources:
                   - s3:GetBucketLocation
                 Effect: Allow
                 Resource:
-                  - !Sub "${TelemetryDataBucketArn}/mcd-otel-collector/*"
+                  - !Sub "${TelemetryDataBucketArn}/mcd/otel-collector/*"
                   - !Ref TelemetryDataBucketArn
           PolicyName: S3Export
       Tags:
@@ -342,19 +342,19 @@ Resources:
                       s3uploader:
                         region: ${AWS::Region}
                         s3_bucket: ${ExternalS3BucketName}
-                        s3_prefix: mcd-otel-collector/traces
+                        s3_prefix: mcd/otel-collector/traces
                         file_prefix: traces
                     awss3/metrics:
                       s3uploader:
                         region: ${AWS::Region}
                         s3_bucket: ${ExternalS3BucketName}
-                        s3_prefix: mcd-otel-collector/metrics
+                        s3_prefix: mcd/otel-collector/metrics
                         file_prefix: metrics
                     awss3/logs:
                       s3uploader:
                         region: ${AWS::Region}
                         s3_bucket: ${ExternalS3BucketName}
-                        s3_prefix: mcd-otel-collector/logs
+                        s3_prefix: mcd/otel-collector/logs
                         file_prefix: logs
 
                   service:

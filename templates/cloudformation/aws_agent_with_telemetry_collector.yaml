@@ -96,17 +96,6 @@ Resources:
           - ExpirationInDays: 30
             Prefix: 'mcd/otel-collector/'
             Status: Enabled
-      # CORS configuration required for access through pre-signed URLs from the browser
-      CorsConfiguration:
-        CorsRules:
-          - AllowedHeaders:
-              - '*'
-            AllowedMethods:
-              - GET
-            AllowedOrigins:
-              - 'https://getmontecarlo.com'
-              - 'https://*.getmontecarlo.com'
-            MaxAge: 3000
     Type: AWS::S3::Bucket
   StorageSSLPolicy:
     Properties:
