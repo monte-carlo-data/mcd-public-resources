@@ -33,11 +33,6 @@ Parameters:
     Description: >
       Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
     Type: CommaDelimitedList
-  ExistingVpcAllowedCidrBlock:
-    Description: CIDR block allowed to access the OpenTelemetry Collector endpoints
-    Type: String
-    Default: "10.0.0.0/8"
-    AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$'
   TelemetryDataBucketArn:
     Description: ARN of the S3 bucket to store OpenTelemetry data such as traces, metrics, and logs.
     Type: String
@@ -419,17 +414,6 @@ Resources:
     Properties:
       GroupDescription: Security group for OpenTelemetry Collector containers
       VpcId: !Ref ExistingVpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: !Ref GRPCPort
-          ToPort: !Ref GRPCPort
-          CidrIp: !Ref ExistingVpcAllowedCidrBlock
-          Description: Allow OTLP gRPC from specified CIDR block (via NLB)
-        - IpProtocol: tcp
-          FromPort: !Ref HTTPPort
-          ToPort: !Ref HTTPPort
-          CidrIp: !Ref ExistingVpcAllowedCidrBlock
-          Description: Allow OTLP HTTP from specified CIDR block (via NLB)
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
@@ -451,6 +435,11 @@ Outputs:
     Value: !GetAtt ExternalAccessRole.Arn
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorExternalAccessRoleArn"
+  OpenTelemetryCollectorSecurityGroupId:
+    Description: The ID of the security group for the OpenTelemetry Collector
+    Value: !Ref SecurityGroup
+    Export:
+      Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorSecurityGroupId"
 Rules:
   ValidatePortConfiguration:
     Assertions:

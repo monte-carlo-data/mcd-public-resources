@@ -29,11 +29,6 @@ Parameters:
   ExistingSubnetIds:
     Description: List of subnet IDs where the Agent and OpenTelemetry Collector will be deployed (should be private subnets)
     Type: List<AWS::EC2::Subnet::Id>
-  ExistingVpcAllowedCidrBlock:
-    Description: CIDR block allowed to access the OpenTelemetry Collector endpoints. Adjust this to match your VPC's CIDR range or specific network requirements.
-    Type: String
-    Default: "10.0.0.0/8"
-    AllowedPattern: '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$'
   MonteCarloCloudAccountId:
     Description: >
       For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, 
@@ -111,7 +106,6 @@ Resources:
       Parameters:
         ExistingVpcId: !Ref ExistingVpcId
         ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
-        ExistingVpcAllowedCidrBlock: !Ref ExistingVpcAllowedCidrBlock
         TelemetryDataBucketArn: !GetAtt Storage.Arn
         ExternalID: !Ref OpenTelemetryCollectorExternalID
         ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
@@ -203,3 +197,6 @@ Outputs:
   OpenTelemetryCollectorExternalAccessRoleArn:
     Description: The ARN of the IAM role for external access to the OpenTelemetry S3 bucket
     Value: !GetAtt OpenTelemetryCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn
+  OpenTelemetryCollectorSecurityGroupId:
+    Description: The ID of the security group for the OpenTelemetry Collector
+    Value: !GetAtt OpenTelemetryCollector.Outputs.OpenTelemetryCollectorSecurityGroupId
