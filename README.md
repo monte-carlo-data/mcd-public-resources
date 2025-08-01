@@ -38,6 +38,12 @@ Can be used to connect an Agent to a VPC for peering and/or IP whitelisting.
 This [example](templates/cloudformation/aws_agent_with_basic_vpc.yaml) demonstrates how you can deploy an agent with
 this connected VPC in one stack.
 
+#### <ins>OpenTelemetry Collector ([source](templates/cloudformation/aws_otel_collector_ecs.yaml))</ins>
+
+This template stands up the OpenTelemetry Collector stack to run in AWS ECS, exposing ports for GRPC and HTTP access. It includes the OpenTelemetry configuration to write incoming LLM agent traces, metrics, and logs to an S3 bucket. The stack also includes the creation of an IAM role to provide external read-only access the S3 bucket so the LLM traces can be ingested into your data warehouse.
+
+This [example](templates/cloudformation/aws_agent_with_opentelemetry_collector.yaml) demonstrates how you can deploy an agent, a data store storage bucket, and the OpenTelemetry Collector in one stack.
+
 ### Terraform
 
 #### <ins>GCS Data Store for customer-hosted object storage deployments in GCP ([source](templates/terraform/gcs_data_store.tf))</ins>
