@@ -66,7 +66,7 @@ Parameters:
   OpenTelemetryCollectorExternalID:
     Description: External ID for OpenTelemetry Collector S3 access. Update this value later after the CF stack is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery)
     Type: String
-    Default: "000"
+    Default: "N/A"
   OpenTelemetryCollectorExternalPrincipalType:
     Description: Type of principal for OpenTelemetry Collector external access role. For Snowflake and Databricks, use "AWS". For BigQuery, use "Federated".
     Type: String
@@ -84,9 +84,39 @@ Parameters:
     Default: ""
     AllowedPattern: '^(|arn:aws:sqs:[^:]+:[0-9]{12}:[^:]+)$'
     ConstraintDescription: Must be either empty or a valid SQS ARN (arn:aws:sqs:region:account:queue-name)
+  OpenTelemetryCollectorImage:
+    Description: The image URI for the OpenTelemetry Collector container image.
+    Type: String
+    Default: "otel/opentelemetry-collector-contrib:latest"
 Conditions:
   HasNotificationChannel: !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, ""]]
 Resources:
+  Agent:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
+      Parameters:
+        CloudAccountId: !Ref MonteCarloCloudAccountId
+        ConcurrentExecutions: !Ref AgentConcurrentExecutions
+        ExistingVpcId: !Ref ExistingVpcId
+        ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
+        ImageUri: !Ref AgentImageUri
+        MemorySize: !Ref AgentMemorySize
+        ExistingStorageArn: !GetAtt Storage.Arn
+  OpenTelemetryCollector:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: [Agent]
+    Properties:
+      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_otel_collector_ecs.yaml
+      Parameters:
+        ExistingVpcId: !Ref ExistingVpcId
+        ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
+        ExistingVpcAllowedCidrBlock: !Ref ExistingVpcAllowedCidrBlock
+        TelemetryDataBucketArn: !GetAtt Storage.Arn
+        ExternalID: !Ref OpenTelemetryCollectorExternalID
+        ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
+        ExternalAccessPrincipalType: !Ref OpenTelemetryCollectorExternalPrincipalType
+        ContainerImage: !Ref OpenTelemetryCollectorImage
   Storage:
     Properties:
       BucketEncryption:
@@ -148,37 +178,12 @@ Resources:
                 aws:SecureTransport:
                   - false
     Type: AWS::S3::BucketPolicy
-  Agent:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_apollo_agent.yaml
-      Parameters:
-        CloudAccountId: !Ref MonteCarloCloudAccountId
-        ConcurrentExecutions: !Ref AgentConcurrentExecutions
-        ExistingVpcId: !Ref ExistingVpcId
-        ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
-        ImageUri: !Ref AgentImageUri
-        MemorySize: !Ref AgentMemorySize
-        ExistingStorageArn: !GetAtt Storage.Arn
-  OpenTelemetryCollector:
-    Type: AWS::CloudFormation::Stack
-    DependsOn: [Agent]
-    Properties:
-      TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_otel_collector_ecs.yaml
-      Parameters:
-        ExistingVpcId: !Ref ExistingVpcId
-        ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
-        ExistingVpcAllowedCidrBlock: !Ref ExistingVpcAllowedCidrBlock
-        TelemetryDataBucketArn: !GetAtt Storage.Arn
-        ExternalID: !Ref OpenTelemetryCollectorExternalID
-        ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
-        ExternalAccessPrincipalType: !Ref OpenTelemetryCollectorExternalPrincipalType
 Outputs:
   StorageBucketName:
-    Description: Name of the S3 bucket
+    Description: Name of the S3 bucket used by the Agent and OpenTelemetry Collector to store data sampling records and telemetry data.
     Value: !Ref Storage
   StorageBucketArn:
-    Description: ARN of the S3 bucket
+    Description: ARN of the S3 bucket used by the Agent and OpenTelemetry Collector to store data sampling records and telemetry data.
     Value: !GetAtt Storage.Arn
   AgentFunctionArn:
     Description: Agent Function ARN. To be used in registering.
@@ -195,3 +200,6 @@ Outputs:
   OpenTelemetryCollectorHTTPEndpoint:
     Description: The HTTP endpoint for the OpenTelemetry Collector
     Value: !GetAtt OpenTelemetryCollector.Outputs.OpenTelemetryCollectorHTTPEndpoint
+  OpenTelemetryCollectorExternalAccessRoleArn:
+    Description: The ARN of the IAM role for external access to the OpenTelemetry S3 bucket
+    Value: !GetAtt OpenTelemetryCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn

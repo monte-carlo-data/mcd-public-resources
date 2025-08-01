@@ -104,8 +104,9 @@ Parameters:
   ExistingStorageArn:
     Description: >
       Optionally use existing S3 bucket for the agent. If not specified new bucket will be created.
-      NOTE: We strongly recommend that you do not share storage accounts with other jobs, as Monte Carlo might overwrite existing data.
+      NOTE: We strongly recommend that you do not share buckets with other jobs, as Monte Carlo might overwrite existing data.
     Type: String
+    Default: "N/A"
 Outputs:
   FunctionArn:
     Description: Agent Function ARN. To be used in registering.
@@ -135,7 +136,7 @@ Conditions:
   ShouldSkipCloudAccountPolicy: !Equals
     - !Ref 'CloudAccountId'
     - '590183797493'
-  ShouldCreateStorage: !Equals [ !Ref ExistingStorageArn, '' ]
+  ShouldCreateStorage: !Equals [ !Ref ExistingStorageArn, 'N/A' ]
 Resources:
   Storage:
     Condition: ShouldCreateStorage

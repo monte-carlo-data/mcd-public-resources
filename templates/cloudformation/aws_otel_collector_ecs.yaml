@@ -98,7 +98,7 @@ Parameters:
   ExternalID:
     Description: External ID to access the S3 bucket. Update this value later after the CF stack is created.
     Type: String
-    Default: "000"
+    Default: "N/A"
   ExternalAccessPrincipal:
     Description: Principal (AWS ARN/account ID or Federated identifier) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
     Type: String
@@ -179,7 +179,6 @@ Resources:
       LoadBalancerArn: !Ref LoadBalancer
       Port: !Ref GRPCPort
       Protocol: TCP
-
   ListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -447,11 +446,11 @@ Outputs:
     Value: !Sub "http://${LoadBalancer.DNSName}:${HTTPPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorHTTPEndpoint"
-  ExternalAccessRoleArn:
+  OpenTelemetryCollectorExternalAccessRoleArn:
     Description: The ARN of the IAM role for external access to the OpenTelemetry S3 bucket
     Value: !GetAtt ExternalAccessRole.Arn
     Export:
-      Name: !Sub "${AWS::StackName}:ExternalAccessRoleArn"
+      Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorExternalAccessRoleArn"
 Rules:
   ValidatePortConfiguration:
     Assertions:
