@@ -38,6 +38,7 @@ Metadata:
           - ImageUri
           - MemorySize
           - ConcurrentExecutions
+          - ExistingStorageArn
     ParameterLabels:
       CloudAccountId:
         default: Select a Monte Carlo AWS Account ID
@@ -53,6 +54,8 @@ Metadata:
         default: Select the agent image source
       MemorySize:
         default: Set agent memory
+      ExistingStorageArn:
+        default: Data Store S3 bucket ARN for agent storage
 Parameters:
   CloudAccountId:
     Description: >
@@ -98,6 +101,12 @@ Parameters:
     MinValue: 256
     MaxValue: 10240
     Type: Number
+  ExistingStorageArn:
+    Description: >
+      Optionally use existing S3 bucket for the agent. If not specified new bucket will be created.
+      NOTE: We strongly recommend that you do not share buckets with other jobs, as Monte Carlo might overwrite existing data.
+    Type: String
+    Default: "N/A"
 Outputs:
   FunctionArn:
     Description: Agent Function ARN. To be used in registering.
@@ -114,7 +123,7 @@ Outputs:
     Value: !Ref SecurityGroup
   StorageArn:
     Description: Storage bucket ARN.
-    Value: !GetAtt Storage.Arn
+    Value: !If [ ShouldCreateStorage, !GetAtt Storage.Arn, !Ref ExistingStorageArn ]
 Conditions:
   ShouldCreateUpdatePolicy: !Equals
     - !Ref EnableRemoteUpdates
@@ -127,8 +136,10 @@ Conditions:
   ShouldSkipCloudAccountPolicy: !Equals
     - !Ref 'CloudAccountId'
     - '590183797493'
+  ShouldCreateStorage: !Equals [ !Ref ExistingStorageArn, 'N/A' ]
 Resources:
   Storage:
+    Condition: ShouldCreateStorage
     Properties:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
@@ -160,6 +171,7 @@ Resources:
             MaxAge: 3000
     Type: AWS::S3::Bucket
   StorageSSLPolicy:
+    Condition: ShouldCreateStorage
     Properties:
       Bucket: !Ref Storage
       PolicyDocument:
@@ -204,7 +216,7 @@ Resources:
               - !Ref 'AWS::Region'
               - !Select [ 1, !Split [ '*', !Ref ImageUri ] ]
           MCD_AGENT_CLOUD_PLATFORM: AWS
-          MCD_STORAGE_BUCKET_NAME: !Ref Storage
+          MCD_STORAGE_BUCKET_NAME: !If [ ShouldCreateStorage, !Ref Storage, !Select [5, !Split [':', !Ref ExistingStorageArn]] ]
           MCD_AGENT_IS_REMOTE_UPGRADABLE: !If [ ShouldCreateUpdatePolicy, True, False ]
           MCD_AGENT_WRAPPER_TYPE: CLOUDFORMATION
           MCD_AGENT_WRAPPER_VERSION: 1.0.1
@@ -255,8 +267,8 @@ Resources:
                   - s3:GetBucketAcl
                 Effect: Allow
                 Resource:
-                  - !Sub 'arn:aws:s3:::${Storage}'
-                  - !Sub 'arn:aws:s3:::${Storage}/*'
+                  - !If [ ShouldCreateStorage, !GetAtt Storage.Arn, !Ref ExistingStorageArn ]
+                  - !If [ ShouldCreateStorage, !Sub '${Storage.Arn}/*', !Sub '${ExistingStorageArn}/*' ]
           PolicyName: S3Policy
         - PolicyDocument:
             Version: 2012-10-17
