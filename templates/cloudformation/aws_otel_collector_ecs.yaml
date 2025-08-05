@@ -421,6 +421,15 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
+  SecurityGroupIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 4317
+      ToPort: 4318
+      SourceSecurityGroupId: !Ref SecurityGroup
+      Description: Allow TCP ingress on ports 4317 and 4318 from other resources associated with the security group within the VPC
 Outputs:
   OpenTelemetryCollectorGRPCEndpoint:
     Description: The gRPC endpoint for the OpenTelemetry Collector
