@@ -116,7 +116,7 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-  LoadBalancer:
+  NetworkLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Scheme: internal
@@ -173,7 +173,7 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroupGRPC
-      LoadBalancerArn: !Ref LoadBalancer
+      LoadBalancerArn: !Ref NetworkLoadBalancer
       Port: !Ref GRPCPort
       Protocol: TCP
   ListenerHTTP:
@@ -182,7 +182,7 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroupHTTP
-      LoadBalancerArn: !Ref LoadBalancer
+      LoadBalancerArn: !Ref NetworkLoadBalancer
       Port: !Ref HTTPPort
       Protocol: TCP
   EcsCluster:
@@ -424,12 +424,12 @@ Resources:
 Outputs:
   OpenTelemetryCollectorGRPCEndpoint:
     Description: The gRPC endpoint for the OpenTelemetry Collector
-    Value: !Sub "${LoadBalancer.DNSName}:${GRPCPort}"
+    Value: !Sub "${NetworkLoadBalancer.DNSName}:${GRPCPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorGRPCEndpoint"
   OpenTelemetryCollectorHTTPEndpoint:
     Description: The HTTP endpoint for the OpenTelemetry Collector
-    Value: !Sub "http://${LoadBalancer.DNSName}:${HTTPPort}"
+    Value: !Sub "http://${NetworkLoadBalancer.DNSName}:${HTTPPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorHTTPEndpoint"
   OpenTelemetryCollectorExternalAccessRoleArn:
