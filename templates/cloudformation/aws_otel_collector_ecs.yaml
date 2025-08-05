@@ -97,14 +97,14 @@ Parameters:
   ExternalAccessPrincipal:
     Description: Principal (AWS ARN/account ID or Federated identifier) allowed to assume the external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created.
     Type: String
-    Default: ""
+    Default: "N/A"
   ExternalAccessPrincipalType:
     Description: Type of principal for external access role
     Type: String
     Default: "AWS"
     AllowedValues: ["AWS", "Federated"]
 Conditions:
-  UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, ""]
+  UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, "N/A"]
   UseAWSPrincipal: !Equals [!Ref ExternalAccessPrincipalType, "AWS"]
 Resources:
   LogGroup:
@@ -116,12 +116,14 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-  LoadBalancer:
+  NetworkLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Scheme: internal
       Type: network
       Subnets: !Ref ExistingSubnetIds
+      SecurityGroups:
+        - !Ref SecurityGroup
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
@@ -171,7 +173,7 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroupGRPC
-      LoadBalancerArn: !Ref LoadBalancer
+      LoadBalancerArn: !Ref NetworkLoadBalancer
       Port: !Ref GRPCPort
       Protocol: TCP
   ListenerHTTP:
@@ -180,7 +182,7 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroupHTTP
-      LoadBalancerArn: !Ref LoadBalancer
+      LoadBalancerArn: !Ref NetworkLoadBalancer
       Port: !Ref HTTPPort
       Protocol: TCP
   EcsCluster:
@@ -419,15 +421,24 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
+  SecurityGroupIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 4317
+      ToPort: 4318
+      SourceSecurityGroupId: !Ref SecurityGroup
+      Description: Allow TCP ingress on ports 4317 and 4318 from other resources associated with the security group within the VPC
 Outputs:
   OpenTelemetryCollectorGRPCEndpoint:
     Description: The gRPC endpoint for the OpenTelemetry Collector
-    Value: !Sub "${LoadBalancer.DNSName}:${GRPCPort}"
+    Value: !Sub "${NetworkLoadBalancer.DNSName}:${GRPCPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorGRPCEndpoint"
   OpenTelemetryCollectorHTTPEndpoint:
     Description: The HTTP endpoint for the OpenTelemetry Collector
-    Value: !Sub "http://${LoadBalancer.DNSName}:${HTTPPort}"
+    Value: !Sub "http://${NetworkLoadBalancer.DNSName}:${HTTPPort}"
     Export:
       Name: !Sub "${AWS::StackName}:OpenTelemetryCollectorHTTPEndpoint"
   OpenTelemetryCollectorExternalAccessRoleArn:
