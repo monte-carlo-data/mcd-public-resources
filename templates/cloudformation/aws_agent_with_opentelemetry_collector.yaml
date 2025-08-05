@@ -172,6 +172,15 @@ Resources:
                 aws:SecureTransport:
                   - false
     Type: AWS::S3::BucketPolicy
+  OpenTelemetryCollectorIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt OpenTelemetryCollector.Outputs.OpenTelemetryCollectorSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 4317
+      ToPort: 4318
+      CidrIp: 0.0.0.0/0
+      Description: Allow TCP ingress on ports 4317 and 4318 from all IPs within the VPC
 Outputs:
   StorageBucketName:
     Description: Name of the S3 bucket used by the Agent and OpenTelemetry Collector to store data sampling records and telemetry data.
