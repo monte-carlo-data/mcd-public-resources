@@ -122,6 +122,8 @@ Resources:
       Scheme: internal
       Type: network
       Subnets: !Ref ExistingSubnetIds
+      SecurityGroups:
+        - !Ref SecurityGroup
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
