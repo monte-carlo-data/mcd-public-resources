@@ -71,14 +71,14 @@ Parameters:
     Description: AWS Principal (ARN or account ID) allowed to assume the OpenTelemetry Collector external access role. If left empty, will use the current AWS account ID. Update this value later after the CF stack is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery)
     Type: String
     Default: "N/A"
-    AllowedPattern: '^(|[0-9]{12}|arn:aws:.*:.*)$'
-    ConstraintDescription: Must be either empty, a 12-digit AWS account ID, or a valid AWS ARN
+    AllowedPattern: '^(|N/A|[0-9]{12}|arn:aws:.*:.*)$'
+    ConstraintDescription: Must be either empty, N/A, a 12-digit AWS account ID, or a valid AWS ARN
   OpenTelemetryCollectorExternalNotificationChannelArn:
     Description: SQS Queue ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the CF stack is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery).
     Type: String
     Default: "N/A"
-    AllowedPattern: '^(|arn:aws:sqs:[^:]+:[0-9]{12}:[^:]+)$'
-    ConstraintDescription: Must be either empty or a valid SQS ARN (arn:aws:sqs:region:account:queue-name)
+    AllowedPattern: '^(|N/A|arn:aws:sqs:[^:]+:[0-9]{12}:[^:]+)$'
+    ConstraintDescription: Must be either empty, N/A, or a valid SQS ARN (arn:aws:sqs:region:account:queue-name)
   OpenTelemetryCollectorImage:
     Description: The image URI for the OpenTelemetry Collector container image.
     Type: String
