@@ -89,7 +89,7 @@ resource "random_id" "this" {
 }
 
 resource "aws_s3_bucket" "this" {
-  bucket_prefix = "monte-carlo-object-store-"
+  bucket_prefix = "mcd-object-store-"
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
@@ -155,7 +155,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 }
 
 resource "aws_iam_role" "this" {
-  name_prefix = "monte-carlo-object-store-role-"
+  name_prefix = "mcd-object-store-role-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
