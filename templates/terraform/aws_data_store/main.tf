@@ -25,11 +25,6 @@ protections over or in connection with any Software of Derivatives.
 Sample Terraform config file to create a S3 bucket and assumable IAM role for the cloud with customer-hosted
 object storage deployment model on AWS. Additional details and options can be found here: https://docs.getmontecarlo.com/docs/deployment-and-connecting
 
-Notice: Do not apply this Terraform configuration from this directory as it contains other configurations that may create unintended resources. Either:
-1. Copy this file to a new directory and apply from there
-2. Use the -target parameter to specifically apply only these resources
-3. Create a module from this configuration and reference it from a separate root configuration
-
 Usage example (requires Terraform and the AWS CLI):
   AWS_DEFAULT_PROFILE=<Your AWS CLI Profile> terraform init
   AWS_DEFAULT_PROFILE=<Your AWS CLI Profile> terraform apply

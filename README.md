@@ -46,12 +46,7 @@ This [example](templates/cloudformation/aws_agent_with_opentelemetry_collector.y
 
 ### Terraform
 
-Notice: Do not apply any Terraform configuration from this directory as it contains other configurations that may create unintended resources. Either:
-1. Copy the file to a new directory and apply from there
-2. Use the -target parameter to specifically apply only necessary resources
-3. Create a module from the configuration and reference it from a separate root configuration
-
-#### <ins>AWS Data Store for customer-hosted object storage deployments in AWS ([source](templates/terraform/aws_data_store.tf))</ins>
+#### <ins>AWS Data Store for customer-hosted object storage deployments in AWS ([source](templates/terraform/aws_data_store/main.tf))</ins>
 
 This sample config file creates a S3 bucket and assumable IAM role for the cloud with customer-hosted
 object storage deployment model on AWS.
@@ -60,7 +55,7 @@ See [here](https://docs.getmontecarlo.com/docs/platform-architecture) for platfo
 and [here](https://docs.getmontecarlo.com/docs/direct-connection-with-an-aws-data-store) for how to create and register
 a data store on AWS.
 
-#### <ins>GCS Data Store for customer-hosted object storage deployments in GCP ([source](templates/terraform/gcs_data_store.tf))</ins>
+#### <ins>GCS Data Store for customer-hosted object storage deployments in GCP ([source](templates/terraform/gcp_data_store/main.tf))</ins>
 
 This sample config file creates a GCS bucket, role, service account, and key for the cloud with customer-hosted
 object storage deployment model on GCP.
