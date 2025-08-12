@@ -46,6 +46,35 @@ This [example](templates/cloudformation/aws_agent_with_opentelemetry_collector.y
 
 ### Terraform
 
+#### <ins>AWS Data Store for customer-hosted object storage deployments in AWS ([source](templates/terraform/aws_data_store.tf))</ins>
+
+This sample config file creates a S3 bucket and assumable IAM role for the cloud with customer-hosted
+object storage deployment model on AWS.
+
+Usage example (requires Terraform and the AWS CLI):
+```bash
+terraform init
+terraform plan
+terraform apply
+```
+
+Inputs:
+- `monte_carlo_cloud_account_id` - The Monte Carlo AWS Account ID (default: 590183797493)
+- `data_store_region` - AWS region to deploy resources (default: "us-east-1")
+
+Outputs:
+- `object_store_bucket_name` - The generated S3 bucket name
+- `object_store_bucket_arn` - The S3 bucket ARN
+- `object_store_role_arn` - The IAM role ARN
+- `object_store_role_name` - The IAM role name
+- `object_store_role_external_id` - The external ID for the role
+
+These can be used when registering the data store with Monte Carlo.
+
+See [here](https://docs.getmontecarlo.com/docs/platform-architecture) for platform details
+and [here](https://docs.getmontecarlo.com/docs/direct-connection-with-an-aws-data-store) for how to create and register
+a data store on AWS.
+
 #### <ins>GCS Data Store for customer-hosted object storage deployments in GCP ([source](templates/terraform/gcs_data_store.tf))</ins>
 
 This sample config file creates a GCS bucket, role, service account, and key for the cloud with customer-hosted
