@@ -46,7 +46,7 @@ This [example](templates/cloudformation/aws_agent_with_opentelemetry_collector.y
 
 ### Terraform
 
-#### <ins>AWS Data Store for customer-hosted object storage deployments in AWS ([source](templates/terraform/aws_data_store/main.tf))</ins>
+#### <ins>S3 Data Store for customer-hosted object storage deployments in AWS ([source](templates/terraform/aws_data_store/main.tf))</ins>
 
 This sample config file creates a S3 bucket and assumable IAM role for the cloud with customer-hosted
 object storage deployment model on AWS.
