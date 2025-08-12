@@ -77,8 +77,6 @@ variable "data_store_region" {
   default     = "us-east-1"
 }
 
-data "aws_caller_identity" "current" {}
-
 locals {
   should_skip_cloud_account_policy = var.monte_carlo_cloud_account_id == "590183797493"
   external_id                      = random_id.this.hex
