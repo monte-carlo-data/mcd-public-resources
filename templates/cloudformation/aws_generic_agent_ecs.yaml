@@ -66,20 +66,6 @@ Resources:
         - Key: 'mcd:agent:platform'
           Value: 'aws_generic'
 
-  # VPC Endpoint for CloudWatch Logs (recommended for private subnets)
-  CloudWatchLogsVpcEndpoint:
-    Type: AWS::EC2::VPCEndpoint
-    Properties:
-      VpcId: !Ref VpcId
-      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
-      VpcEndpointType: Interface
-      SubnetIds: !Ref VpcSubnetIds
-      SecurityGroupIds:
-        - !Ref SecurityGroupId
-      Tags:
-        - Key: 'mcd:agent:platform'
-          Value: 'aws_generic'
-
   EcsCluster:
     Type: 'AWS::ECS::Cluster'
     Properties:
