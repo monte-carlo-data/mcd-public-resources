@@ -29,6 +29,12 @@ Parameters:
   ExistingSubnetIds:
     Description: List of subnet IDs where the Agent and OpenTelemetry Collector will be deployed (should be private subnets)
     Type: List<AWS::EC2::Subnet::Id>
+  ExistingSecurityGroupId:
+    Description: Optional additional security group ID to attach to the OpenTelemetry Collector resources. If provided, this security group will be added to the Network Load Balancer and ECS Service.
+    Type: String
+    Default: "N/A"
+    AllowedPattern: '^(|sg-[0-9a-f]*)$'
+    ConstraintDescription: Must be either 'N/A' or a valid security group ID (sg-xxxxxxxxx)
   MonteCarloCloudAccountId:
     Description: >
       For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, 
@@ -106,6 +112,7 @@ Resources:
       Parameters:
         ExistingVpcId: !Ref ExistingVpcId
         ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
+        ExistingSecurityGroupId: !Ref ExistingSecurityGroupId
         TelemetryDataBucketArn: !GetAtt Storage.Arn
         ExternalID: !Ref OpenTelemetryCollectorExternalID
         ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
