@@ -220,21 +220,6 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
-      Policies:
-        - PolicyName: CloudWatchLogsAccess
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Sid: 'CloudWatchLogsAccess'
-                Effect: 'Allow'
-                Action:
-                  - 'logs:CreateLogStream'
-                  - 'logs:PutLogEvents'
-                  - 'logs:DescribeLogGroups'
-                  - 'logs:FilterLogEvents'
-                Resource:
-                  - !GetAtt LogGroup.Arn
-                  - !Sub '${LogGroup.Arn}:*'
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
