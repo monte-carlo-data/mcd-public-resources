@@ -33,8 +33,8 @@ Parameters:
     Description: Optional additional security group ID to attach to the OpenTelemetry Collector resources. If provided, this security group will be added to the Network Load Balancer and ECS Service.
     Type: String
     Default: "N/A"
-    AllowedPattern: '^(|sg-[0-9a-f]*)$'
-    ConstraintDescription: Must be either 'N/A' or a valid security group ID (sg-xxxxxxxxx)
+    AllowedPattern: '^(|N/A|sg-[0-9a-f]*)$'
+    ConstraintDescription: Must be either empty, N/A, or a valid security group ID (sg-xxxxxxxxx)
   MonteCarloCloudAccountId:
     Description: >
       For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, 
