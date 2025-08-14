@@ -264,16 +264,12 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              - Sid: 'CloudWatchLogsAccess'
+              - Sid: 'FilterLogGroupLogs'
                 Effect: 'Allow'
                 Action:
-                  - 'logs:CreateLogStream'
-                  - 'logs:PutLogEvents'
-                  - 'logs:DescribeLogGroups'
                   - 'logs:FilterLogEvents'
                 Resource:
                   - !GetAtt LogGroup.Arn
-                  - !Sub '${LogGroup.Arn}:*'
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
       Tags:
