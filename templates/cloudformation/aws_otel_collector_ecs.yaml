@@ -37,8 +37,8 @@ Parameters:
     Description: Optional additional security group ID to attach to the OpenTelemetry Collector resources. If provided, this security group will be added to the Network Load Balancer and ECS Service.
     Type: String
     Default: "N/A"
-    AllowedPattern: '^(|sg-[0-9a-f]*)$'
-    ConstraintDescription: Must be either 'N/A' or a valid security group ID (sg-xxxxxxxxx)
+    AllowedPattern: '^(|N/A|sg-[0-9a-f]*)$'
+    ConstraintDescription: Must be either empty, N/A, or a valid security group ID (sg-xxxxxxxxx)
   TelemetryDataBucketArn:
     Description: ARN of the S3 bucket to store OpenTelemetry data such as traces, metrics, and logs.
     Type: String
