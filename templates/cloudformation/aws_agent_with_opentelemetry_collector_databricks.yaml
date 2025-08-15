@@ -77,7 +77,6 @@ Parameters:
     Description: The image URI for the OpenTelemetry Collector container image.
     Type: String
     Default: "otel/opentelemetry-collector-contrib:latest"
-
 Resources:
   SqsNotificationQueue:
     Type: AWS::SQS::Queue
@@ -178,4 +177,4 @@ Outputs:
     Value: !GetAtt SqsNotificationQueue.Arn
   SqsNotificationQueueUrl:
     Description: The URL of the SQS queue for S3 event notifications
-    Value: !Ref SqsNotificationQueue 
+    Value: !Ref SqsNotificationQueue
