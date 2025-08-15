@@ -93,8 +93,9 @@ Resources:
           Value: "monte-carlo"
         - Key: Purpose
           Value: "databricks-notifications"
-  SqsNotificationQueuePolicy:
+  SqsS3AccessPolicy:
     Type: AWS::SQS::QueuePolicy
+    DependsOn: [AgentWithOtelCollector]
     Properties:
       Queues:
         - !Ref SqsNotificationQueue
@@ -110,6 +111,15 @@ Resources:
             Condition:
               ArnLike:
                 aws:SourceArn: !GetAtt AgentWithOtelCollector.Outputs.StorageBucketArn
+  SqsDatabricksAccessPolicy:
+    Type: AWS::SQS::QueuePolicy
+    DependsOn: [AgentWithOtelCollector]
+    Properties:
+      Queues:
+        - !Ref SqsNotificationQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
           - Effect: Allow
             Principal:
               AWS: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn
