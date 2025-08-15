@@ -94,7 +94,6 @@ Resources:
           Value: "databricks-notifications"
   SqsS3AccessPolicy:
     Type: AWS::SQS::QueuePolicy
-    DependsOn: [AgentWithOtelCollector]
     Properties:
       Queues:
         - !Ref SqsNotificationQueue
@@ -112,7 +111,6 @@ Resources:
                 aws:SourceArn: !GetAtt AgentWithOtelCollector.Outputs.StorageBucketArn
   SqsDatabricksAccessPolicy:
     Type: AWS::SQS::QueuePolicy
-    DependsOn: [AgentWithOtelCollector]
     Properties:
       Queues:
         - !Ref SqsNotificationQueue
