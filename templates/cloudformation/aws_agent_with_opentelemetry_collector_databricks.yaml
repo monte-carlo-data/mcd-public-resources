@@ -83,7 +83,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub "mcd-otel-collector-databricks-notifications-${AWS::StackName}"
-      VisibilityTimeoutSeconds: 30
+      VisibilityTimeout: 30
       MessageRetentionPeriod: 1209600
       ReceiveMessageWaitTimeSeconds: 20
       Tags:
