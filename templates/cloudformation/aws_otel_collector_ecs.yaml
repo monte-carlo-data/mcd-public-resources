@@ -292,6 +292,10 @@ Resources:
             Condition:
               StringEquals:
                 sts:ExternalId: !Ref ExternalID
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-ExternalAccessRole-*"
+            Action: sts:AssumeRole
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
