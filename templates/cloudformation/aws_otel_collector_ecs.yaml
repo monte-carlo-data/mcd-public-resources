@@ -277,7 +277,7 @@ Resources:
     # by an external warehouse, such as Snowflake.
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-ExternalAccessRole"
+      RoleName: ExternalAccessRole
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -286,13 +286,13 @@ Resources:
               AWS: !If
                 - UseCurrentAccount
                 - - !Ref AWS::AccountId
-                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-ExternalAccessRole"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole"
                 - !If
                   - UseAWSPrincipal
                   - - !Ref ExternalAccessPrincipal
-                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-ExternalAccessRole"
+                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole"
                   - - !Ref ExternalAccessPrincipal
-                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-ExternalAccessRole"
+                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole"
             Action: sts:AssumeRole
             Condition:
               StringEquals:
