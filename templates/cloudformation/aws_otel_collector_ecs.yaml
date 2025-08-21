@@ -292,15 +292,26 @@ Resources:
             Condition:
               StringEquals:
                 sts:ExternalId: !Ref ExternalID
-          - Effect: Allow
-            Principal:
-              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-ExternalAccessRole-*"
-            Action: sts:AssumeRole
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
+  ExternalAccessSelfAssumePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ExternalAccessSelfAssumePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !GetAtt ExternalAccessRole.Arn
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalID
+      Roles:
+        - !Ref ExternalAccessRole
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
