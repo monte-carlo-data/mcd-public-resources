@@ -288,8 +288,7 @@ Resources:
               - !If
                 - UseAWSPrincipal
                 - AWS:
-                - - !Ref ExternalAccessPrincipal
-                  # Ensure the role is self-assuming
+                  - !Ref ExternalAccessPrincipal
                   - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-EAR"
                 - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
