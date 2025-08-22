@@ -282,17 +282,16 @@ Resources:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
-            Principal:
-              AWS: !If
-                - UseCurrentAccount
-                - - !Ref AWS::AccountId
+            Principal: !If
+              - UseCurrentAccount
+              - AWS: !Ref AWS::AccountId
+              - !If
+                - UseAWSPrincipal
+                - AWS:
+                - - !Ref ExternalAccessPrincipal
+                  # Ensure the role is self-assuming
                   - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole-${AWS::Region}"
-                - !If
-                  - UseAWSPrincipal
-                  - - !Ref ExternalAccessPrincipal
-                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole-${AWS::Region}"
-                  - - !Ref ExternalAccessPrincipal
-                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole-${AWS::Region}"
+                - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
               StringEquals:
