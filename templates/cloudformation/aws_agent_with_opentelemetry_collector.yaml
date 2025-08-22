@@ -104,7 +104,7 @@ Resources:
         ImageUri: !Ref AgentImageUri
         MemorySize: !Ref AgentMemorySize
         ExistingStorageArn: !GetAtt Storage.Arn
-  OpenTelemetryCollector:
+  Otel:
     Type: AWS::CloudFormation::Stack
     DependsOn: [Agent]
     Properties:
