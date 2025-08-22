@@ -277,6 +277,7 @@ Resources:
     # by an external warehouse, such as Snowflake.
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "${AWS::StackName}-EAR"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -286,7 +287,9 @@ Resources:
               - AWS: !Ref AWS::AccountId
               - !If
                 - UseAWSPrincipal
-                - AWS: !Ref ExternalAccessPrincipal
+                - AWS:
+                  - !Ref ExternalAccessPrincipal
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-EAR"
                 - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
