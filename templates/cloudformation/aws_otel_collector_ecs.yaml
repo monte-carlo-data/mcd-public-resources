@@ -277,7 +277,7 @@ Resources:
     # by an external warehouse, such as Snowflake.
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "ExternalAccessRole-${AWS::Region}"
+      RoleName: !Sub "${AWS::StackName}-ExternalAccessRole"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -290,7 +290,7 @@ Resources:
                 - AWS:
                 - - !Ref ExternalAccessPrincipal
                   # Ensure the role is self-assuming
-                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/ExternalAccessRole-${AWS::Region}"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-ExternalAccessRole"
                 - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
