@@ -89,6 +89,10 @@ Parameters:
     Description: The image URI for the OpenTelemetry Collector container image.
     Type: String
     Default: "otel/opentelemetry-collector-contrib:latest"
+  ExternalAccessRoleName:
+    Description: Custom name of the external access role. If left empty, will use the default name of "{AWS::StackName}-EAR".
+    Type: String
+    Default: "N/A"
 Conditions:
   HasNotificationChannel: !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
 Resources:
@@ -118,6 +122,7 @@ Resources:
         ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
         ExternalAccessPrincipalType: !Ref OpenTelemetryCollectorExternalPrincipalType
         ContainerImage: !Ref OpenTelemetryCollectorImage
+        ExternalAccessRoleName: !Ref ExternalAccessRoleName
   Storage:
     Properties:
       BucketEncryption:
