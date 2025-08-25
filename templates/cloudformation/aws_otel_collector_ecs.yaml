@@ -300,7 +300,7 @@ Resources:
                   - !If
                     - UseCustomExternalAccessRoleName
                     - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ExternalAccessRoleName}"
-                    - !Sub "${AWS::StackName}-EAR"
+                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-EAR"
                 - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
