@@ -109,10 +109,15 @@ Parameters:
     Type: String
     Default: "AWS"
     AllowedValues: ["AWS", "Federated"]
+  ExternalAccessRoleName:
+    Description: Custom name of the external access role. If left empty, will use the default name of "{AWS::StackName}-EAR".
+    Type: String
+    Default: "N/A"
 Conditions:
   UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, "N/A"]
   UseAWSPrincipal: !Equals [!Ref ExternalAccessPrincipalType, "AWS"]
   HasAdditionalSecurityGroup: !Not [!Equals [!Ref ExistingSecurityGroupId, "N/A"]]
+  UseCustomExternalAccessRoleName: !Not [!Equals [!Ref ExternalAccessRoleName, "N/A"]]
 Resources:
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -277,7 +282,10 @@ Resources:
     # by an external warehouse, such as Snowflake.
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-EAR"
+      RoleName: !If
+        - UseCustomExternalAccessRoleName
+        - !Ref ExternalAccessRoleName
+        - !Sub "${AWS::StackName}-EAR"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -289,7 +297,10 @@ Resources:
                 - UseAWSPrincipal
                 - AWS:
                   - !Ref ExternalAccessPrincipal
-                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-EAR"
+                  - !If
+                    - UseCustomExternalAccessRoleName
+                    - !Sub "arn:aws:iam::${AWS::AccountId}:role/${ExternalAccessRoleName}"
+                    - !Sub "${AWS::StackName}-EAR"
                 - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
