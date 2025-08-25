@@ -33,6 +33,12 @@ Parameters:
     Description: >
       Comma-delimited list of private subnet IDs (at least 2) for deploying the OpenTelemetry Collector.
     Type: CommaDelimitedList
+  ExistingSecurityGroupId:
+    Description: Optional additional security group ID to attach to the OpenTelemetry Collector resources. If provided, this security group will be added to the Network Load Balancer and ECS Service.
+    Type: String
+    Default: "N/A"
+    AllowedPattern: '^(|N/A|sg-[0-9a-f]*)$'
+    ConstraintDescription: Must be either empty, N/A, or a valid security group ID (sg-xxxxxxxxx)
   TelemetryDataBucketArn:
     Description: ARN of the S3 bucket to store OpenTelemetry data such as traces, metrics, and logs.
     Type: String
@@ -106,6 +112,7 @@ Parameters:
 Conditions:
   UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, "N/A"]
   UseAWSPrincipal: !Equals [!Ref ExternalAccessPrincipalType, "AWS"]
+  HasAdditionalSecurityGroup: !Not [!Equals [!Ref ExistingSecurityGroupId, "N/A"]]
 Resources:
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -122,8 +129,11 @@ Resources:
       Scheme: internal
       Type: network
       Subnets: !Ref ExistingSubnetIds
-      SecurityGroups:
-        - !Ref SecurityGroup
+      SecurityGroups: !If
+        - HasAdditionalSecurityGroup
+        - - !Ref SecurityGroup
+          - !Ref ExistingSecurityGroupId
+        - - !Ref SecurityGroup
       Tags:
         - Key: Service
           Value: "mcd-otel-collector"
@@ -267,6 +277,7 @@ Resources:
     # by an external warehouse, such as Snowflake.
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "${AWS::StackName}-EAR"
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -276,7 +287,9 @@ Resources:
               - AWS: !Ref AWS::AccountId
               - !If
                 - UseAWSPrincipal
-                - AWS: !Ref ExternalAccessPrincipal
+                - AWS:
+                  - !Ref ExternalAccessPrincipal
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/${AWS::StackName}-EAR"
                 - Federated: !Ref ExternalAccessPrincipal
             Action: sts:AssumeRole
             Condition:
@@ -402,8 +415,11 @@ Resources:
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
-          SecurityGroups:
-            - !Ref SecurityGroup
+          SecurityGroups: !If
+            - HasAdditionalSecurityGroup
+            - - !Ref SecurityGroup
+              - !Ref ExistingSecurityGroupId
+            - - !Ref SecurityGroup
           Subnets: !Ref ExistingSubnetIds
       TaskDefinition: !Ref TaskDefinition
       Tags:
