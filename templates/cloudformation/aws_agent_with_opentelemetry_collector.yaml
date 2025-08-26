@@ -89,11 +89,16 @@ Parameters:
     Description: The image URI for the OpenTelemetry Collector container image.
     Type: String
     Default: "otel/opentelemetry-collector-contrib:latest"
+  OpenTelemetryCollectorExistingBucketArn:
+    Description: ARN of an existing S3 bucket to store OpenTelemetry data. If left empty, the data store bucket will be used.
+    Type: String
+    Default: "N/A"
   ExternalAccessRoleName:
     Description: Custom name of the external access role. If left empty, will use the default name of "{AWS::StackName}-EAR".
     Type: String
     Default: "N/A"
 Conditions:
+  UseExistingTelemetryDataBucket: !Not [!Equals [!Ref OpenTelemetryCollectorExistingBucketArn, "N/A"]]
   HasNotificationChannel: !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
 Resources:
   Agent:
@@ -117,7 +122,10 @@ Resources:
         ExistingVpcId: !Ref ExistingVpcId
         ExistingSubnetIds: !Join [ ',', !Ref ExistingSubnetIds ]
         ExistingSecurityGroupId: !Ref ExistingSecurityGroupId
-        TelemetryDataBucketArn: !GetAtt Storage.Arn
+        TelemetryDataBucketArn: !If
+          - UseExistingTelemetryDataBucket
+          - !Ref OpenTelemetryCollectorExistingBucketArn
+          - !GetAtt Storage.Arn
         ExternalID: !Ref OpenTelemetryCollectorExternalID
         ExternalAccessPrincipal: !Ref OpenTelemetryCollectorExternalAccessPrincipal
         ExternalAccessPrincipalType: !Ref OpenTelemetryCollectorExternalPrincipalType
