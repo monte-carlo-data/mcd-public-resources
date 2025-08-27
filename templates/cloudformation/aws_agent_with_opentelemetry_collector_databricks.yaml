@@ -81,7 +81,6 @@ Resources:
   SqsNotificationQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub "mcd-otel-collector-databricks-notifications-${AWS::StackName}"
       VisibilityTimeout: 30
       MessageRetentionPeriod: 1209600
       ReceiveMessageWaitTimeSeconds: 20
@@ -126,8 +125,25 @@ Resources:
               - sqs:GetQueueAttributes
               - sqs:GetQueueUrl
             Resource: !GetAtt SqsNotificationQueue.Arn
+  OpenTelemetryCollectorSqsAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Policy allowing OpenTelemetry Collector to access SQS queue for Databricks notifications"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+            Resource: !GetAtt SqsNotificationQueue.Arn
+      Roles:
+        - !Select [1, !Split ['/', !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn]]
   AgentWithOtelCollector:
     Type: AWS::CloudFormation::Stack
+    StackName: !Sub "${AWS::StackName}-Otel"
     Properties:
       TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_agent_with_opentelemetry_collector.yaml
       Parameters:
@@ -170,6 +186,9 @@ Outputs:
   OpenTelemetryCollectorSecurityGroupId:
     Description: The ID of the security group for the OpenTelemetry Collector
     Value: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorSecurityGroupId
+  OpenTelemetryCollectorSqsAccessPolicyArn:
+    Description: The ARN of the IAM managed policy for SQS access
+    Value: !Ref OpenTelemetryCollectorSqsAccessPolicy
   SqsNotificationQueueArn:
     Description: The ARN of the SQS queue for S3 event notifications
     Value: !GetAtt SqsNotificationQueue.Arn
