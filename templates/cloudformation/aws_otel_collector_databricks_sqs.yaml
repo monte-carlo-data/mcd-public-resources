@@ -45,8 +45,6 @@ Resources:
           Value: "mcd-otel-collector"
         - Key: Provider
           Value: "monte-carlo"
-        - Key: Purpose
-          Value: "databricks-notifications"
   SqsS3AccessPolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
