@@ -107,7 +107,7 @@ Resources:
             Resource: !GetAtt SqsNotificationQueue.Arn
             Condition:
               ArnLike:
-                aws:SourceArn: !GetAtt AgentWithOtelCollector.Outputs.StorageBucketArn
+                aws:SourceArn: !GetAtt Otel.Outputs.StorageBucketArn
   SqsDatabricksAccessPolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
@@ -118,7 +118,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn
+              AWS: !GetAtt Otel.Outputs.OpenTelemetryCollectorExternalAccessRoleArn
             Action:
               - sqs:ReceiveMessage
               - sqs:DeleteMessage
@@ -140,10 +140,9 @@ Resources:
               - sqs:GetQueueUrl
             Resource: !GetAtt SqsNotificationQueue.Arn
       Roles:
-        - !Select [1, !Split ['/', !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn]]
-  AgentWithOtelCollector:
+        - !Select [1, !Split ['/', !GetAtt Otel.Outputs.OpenTelemetryCollectorExternalAccessRoleArn]]
+  Otel:
     Type: AWS::CloudFormation::Stack
-    StackName: !Sub "${AWS::StackName}-Otel"
     Properties:
       TemplateURL: https://mcd-public-resources.s3.amazonaws.com/cloudformation/aws_agent_with_opentelemetry_collector.yaml
       Parameters:
@@ -161,31 +160,31 @@ Resources:
 Outputs:
   StorageBucketName:
     Description: Name of the S3 bucket used by the Agent and OpenTelemetry Collector to store data sampling records and telemetry data.
-    Value: !GetAtt AgentWithOtelCollector.Outputs.StorageBucketName
+    Value: !GetAtt Otel.Outputs.StorageBucketName
   StorageBucketArn:
     Description: ARN of the S3 bucket used by the Agent and OpenTelemetry Collector to store data sampling records and telemetry data.
-    Value: !GetAtt AgentWithOtelCollector.Outputs.StorageBucketArn
+    Value: !GetAtt Otel.Outputs.StorageBucketArn
   AgentFunctionArn:
     Description: Agent Function ARN. To be used in registering.
-    Value: !GetAtt AgentWithOtelCollector.Outputs.AgentFunctionArn
+    Value: !GetAtt Otel.Outputs.AgentFunctionArn
   AgentInvocationRoleArn:
     Description: Assumable role ARN. To be used in registering.
-    Value: !GetAtt AgentWithOtelCollector.Outputs.AgentInvocationRoleArn
+    Value: !GetAtt Otel.Outputs.AgentInvocationRoleArn
   AgentInvocationRoleExternalId:
     Description: Assumable role External ID. To be used in registering.
-    Value: !GetAtt AgentWithOtelCollector.Outputs.AgentInvocationRoleExternalId
+    Value: !GetAtt Otel.Outputs.AgentInvocationRoleExternalId
   OpenTelemetryCollectorGRPCEndpoint:
     Description: The gRPC endpoint for the OpenTelemetry Collector
-    Value: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorGRPCEndpoint
+    Value: !GetAtt Otel.Outputs.OpenTelemetryCollectorGRPCEndpoint
   OpenTelemetryCollectorHTTPEndpoint:
     Description: The HTTP endpoint for the OpenTelemetry Collector
-    Value: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorHTTPEndpoint
+    Value: !GetAtt Otel.Outputs.OpenTelemetryCollectorHTTPEndpoint
   OpenTelemetryCollectorExternalAccessRoleArn:
     Description: The ARN of the IAM role for external access to the OpenTelemetry S3 bucket
-    Value: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorExternalAccessRoleArn
+    Value: !GetAtt Otel.Outputs.OpenTelemetryCollectorExternalAccessRoleArn
   OpenTelemetryCollectorSecurityGroupId:
     Description: The ID of the security group for the OpenTelemetry Collector
-    Value: !GetAtt AgentWithOtelCollector.Outputs.OpenTelemetryCollectorSecurityGroupId
+    Value: !GetAtt Otel.Outputs.OpenTelemetryCollectorSecurityGroupId
   OpenTelemetryCollectorSqsAccessPolicyArn:
     Description: The ARN of the IAM managed policy for SQS access
     Value: !Ref OpenTelemetryCollectorSqsAccessPolicy
