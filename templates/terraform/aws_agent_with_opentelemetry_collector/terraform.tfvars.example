@@ -1,0 +1,25 @@
+# Example configuration for Monte Carlo Agent with OpenTelemetry Collector
+# Copy this file to terraform.tfvars and update the values as needed
+
+# Required parameters
+deployment_name = "mcd-agent-with-otel"
+existing_vpc_id     = "vpc-12345678"
+existing_subnet_ids = ["subnet-12345678", "subnet-87654321"]
+
+# Optional: Additional security group for OpenTelemetry Collector
+# existing_security_group_id = "sg-12345678"
+
+# Monte Carlo configuration
+cloud_account_id = "590183797493"
+region = "us-east-1"
+remote_upgradable = true
+# agent_image_uri = "590183797493.dkr.ecr.*.amazonaws.com/mcd-agent:latest"
+
+# OpenTelemetry Collector configuration
+# opentelemetry_collector_external_id = "your-external-id-here"
+# opentelemetry_collector_external_principal_type = "AWS"  # or "Federated"
+# opentelemetry_collector_external_access_principal = "123456789012"  # AWS Account ID or ARN
+# opentelemetry_collector_external_notification_channel_arn = "arn:aws:sqs:region:account:queue-name"
+# opentelemetry_collector_image = "otel/opentelemetry-collector-contrib:latest"
+# opentelemetry_collector_existing_bucket_arn = "arn:aws:s3:::your-existing-bucket"
+# external_access_role_name = "your-custom-role-name"
