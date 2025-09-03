@@ -236,14 +236,14 @@ resource "aws_iam_role" "external_access_role" {
       {
         Effect = "Allow"
         Principal = local.use_current_account ? {
-          AWS = data.aws_caller_identity.current.account_id
-          } : (local.use_aws_principal ? {
-            AWS = [
-              var.external_access_principal,
-              "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.external_access_role_name}"
-            ]
-            } : {
-            Federated = var.external_access_principal
+          AWS = [data.aws_caller_identity.current.account_id]
+        } : (local.use_aws_principal ? {
+          AWS = [
+            var.external_access_principal,
+            "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.external_access_role_name}"
+          ]
+        } : {
+          Federated = [var.external_access_principal]
         })
         Action = "sts:AssumeRole"
         Condition = {
