@@ -205,7 +205,7 @@ resource "aws_iam_role" "task_role" {
 
 # IAM Policy for Task Role (S3 Export)
 resource "aws_iam_role_policy" "task_role_s3_policy" {
-  name = "S3Export"
+  name = "${var.deployment_name}-S3Export"
   role = aws_iam_role.task_role.id
 
   policy = jsonencode({
@@ -260,7 +260,7 @@ resource "aws_iam_role" "external_access_role" {
 
 # External Access S3 Read Only Policy
 resource "aws_iam_policy" "external_access_s3_read_only_policy" {
-  name = "OpenTelemetryS3ExternalAccessReadOnly"
+  name = "${var.deployment_name}-OpenTelemetryS3ExternalAccessReadOnly"
 
   policy = jsonencode({
     Version = "2012-10-17"
