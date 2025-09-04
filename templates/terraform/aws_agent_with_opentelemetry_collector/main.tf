@@ -21,9 +21,6 @@ locals {
   use_existing_telemetry_data_bucket = var.opentelemetry_collector_existing_bucket_arn != "N/A"
   has_notification_channel           = var.opentelemetry_collector_external_notification_channel_arn != "N/A"
 
-  # Extract S3 bucket name from ARN
-  storage_bucket_name = split(":", module.agent.mcd_agent_storage_bucket_arn)[5]
-
   # Common tags
   common_tags = {
     Service  = var.deployment_name
@@ -34,7 +31,7 @@ locals {
 # Monte Carlo Agent Module
 module "agent" {
   source  = "monte-carlo-data/mcd-agent/aws"
-  version = "1.0.1"
+  version = "1.0.3"
 
   cloud_account_id  = var.cloud_account_id
   private_subnets   = var.existing_subnet_ids
@@ -62,7 +59,7 @@ module "opentelemetry_collector" {
 # S3 Bucket Lifecycle Configuration for OpenTelemetry Collector data (conditional)
 resource "aws_s3_bucket_lifecycle_configuration" "otel_collector_lifecycle" {
   count  = local.use_existing_telemetry_data_bucket ? 0 : 1
-  bucket = local.storage_bucket_name
+  bucket = module.agent.mcd_agent_storage_bucket_name
 
   rule {
     id     = "${var.deployment_name}-otel-collector-expiration"
@@ -81,7 +78,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "otel_collector_lifecycle" {
 # S3 Bucket Notification Configuration for OpenTelemetry Collector (conditional)
 resource "aws_s3_bucket_notification" "storage_notification" {
   count  = (local.has_notification_channel && !local.use_existing_telemetry_data_bucket) ? 1 : 0
-  bucket = local.storage_bucket_name
+  bucket = module.agent.mcd_agent_storage_bucket_name
 
   queue {
     id        = "${var.deployment_name}-opentelemetry-collector-notifications"
