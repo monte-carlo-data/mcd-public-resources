@@ -59,8 +59,9 @@ module "opentelemetry_collector" {
   external_access_role_name      = var.external_access_role_name
 }
 
-# S3 Bucket Lifecycle Configuration for OpenTelemetry Collector data
+# S3 Bucket Lifecycle Configuration for OpenTelemetry Collector data (conditional)
 resource "aws_s3_bucket_lifecycle_configuration" "otel_collector_lifecycle" {
+  count  = local.use_existing_telemetry_data_bucket ? 0 : 1
   bucket = local.storage_bucket_name
 
   rule {
@@ -79,7 +80,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "otel_collector_lifecycle" {
 
 # S3 Bucket Notification Configuration for OpenTelemetry Collector (conditional)
 resource "aws_s3_bucket_notification" "storage_notification" {
-  count  = local.has_notification_channel ? 1 : 0
+  count  = (local.has_notification_channel && !local.use_existing_telemetry_data_bucket) ? 1 : 0
   bucket = local.storage_bucket_name
 
   queue {
