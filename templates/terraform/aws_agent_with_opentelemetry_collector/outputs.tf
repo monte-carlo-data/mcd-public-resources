@@ -2,7 +2,7 @@
 
 output "storage_bucket_name" {
   description = "Name of the S3 bucket used by the Agent and OpenTelemetry Collector to store data sampling records and telemetry data."
-  value       = local.storage_bucket_name
+  value       = module.agent.mcd_agent_storage_bucket_name
 }
 
 output "storage_bucket_arn" {
