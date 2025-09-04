@@ -1,6 +1,6 @@
 # Monte Carlo Agent with OpenTelemetry Collector - Terraform Module
 
-This Terraform module deploys a Monte Carlo Agent, Data Store, and OpenTelemetry Collector, mirroring the functionality of the CloudFormation template `aws_agent_with_opentelemetry_collector.yaml`.
+This Terraform module deploys a Monte Carlo Agent, Data Store, and OpenTelemetry Collector.
 
 ## Overview
 
@@ -9,36 +9,38 @@ This module creates:
 - An OpenTelemetry Collector using the local `aws_otel_collector` module
 - All necessary IAM roles and security groups
 
+## Prerequisites
+
+- Terraform >= 1.0
+- AWS CLI configured with appropriate permissions
+- Existing VPC with at least 2 private subnets
+
 ## Usage
 
-```hcl
-module "mcd_agent_with_otel" {
-  source = "./templates/terraform/aws_agent_with_opentelemetry_collector"
+1. Copy the example variables file:
+   ```bash
+   cp terraform.tfvars.example terraform.tfvars
+   ```
 
-  deployment_name = "mcd-agent-with-otel"
-  existing_vpc_id     = "vpc-12345678"
-  existing_subnet_ids = ["subnet-12345678", "subnet-87654321"]
-  
-  # Optional: Additional security group
-  existing_security_group_id = "sg-12345678"
-  
-  # Monte Carlo configuration
-  cloud_account_id = "590183797493"
-  region = "us-east-1"
-  remote_upgradable = true
-  
-  # OpenTelemetry Collector configuration
-  opentelemetry_collector_external_id = "your-external-id"
-  opentelemetry_collector_external_access_principal = "123456789012"
-}
-```
+2. Edit `terraform.tfvars` with your specific values:
+   - `deployment_name`: Unique name for your deployment
+   - `existing_vpc_id`: Your VPC ID
+   - `existing_subnet_ids`: List of at least 2 private subnet IDs
+   - `cloud_account_id`: Your Monte Carlo cloud account ID
 
-## Requirements
+3. Initialize and apply:
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
 
-| Name | Version |
-|------|---------|
-| terraform | >= 1.0 |
-| aws | ~> 5.0 |
+## Required Variables
+
+- `deployment_name`: Name for the deployment
+- `existing_vpc_id`: VPC ID where resources will be deployed
+- `existing_subnet_ids`: List of private subnet IDs (minimum 2)
+- `cloud_account_id`: Monte Carlo cloud account ID
 
 ## Providers
 
@@ -107,9 +109,22 @@ The module uses the S3 bucket created by the Monte Carlo Agent module, which inc
 - Configurable security groups
 - IAM roles with least privilege access
 
-## Notes
+## Post-Deployment Configuration
 
-- The OpenTelemetry Collector will use the S3 bucket created by the Monte Carlo Agent module unless `opentelemetry_collector_existing_bucket_arn` is specified
-- S3 bucket management (encryption, basic lifecycle policies) is handled by the Monte Carlo Agent module
-- Additional lifecycle policies and S3 notifications for OpenTelemetry collector data are configured by this module
+After deployment, update the external access configuration:
+1. Set `external_id` to a secure random value
+2. Set `external_access_principal` to the appropriate AWS account or federated identity
+3. Run `terraform apply` again to update the external access role
+
+## Notes
+- The OpenTelemetry Collector will use the S3 bucket created by the Monte Carlo Agent module 
+unless `opentelemetry_collector_existing_bucket_arn` is specified
+- S3 bucket management (encryption, basic lifecycle policies) is handled by the Monte Carlo 
+Agent module
+- Additional lifecycle policies and S3 notifications for OpenTelemetry collector data are 
+configured by this module
 - The external access role name defaults to `mcd-otel-collector-EAR` if not specified
+
+## License
+
+Copyright 2023 Monte Carlo Data, Inc.

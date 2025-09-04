@@ -1,6 +1,6 @@
 # Monte Carlo's OpenTelemetry Collector Service - Terraform
 
-This Terraform configuration deploys Monte Carlo's OpenTelemetry Collector Service on AWS ECS Fargate, equivalent to the CloudFormation template `aws_otel_collector_ecs.yaml`.
+This Terraform configuration deploys Monte Carlo's OpenTelemetry Collector Service on AWS ECS.
 
 ## Architecture
 
@@ -69,4 +69,4 @@ After deployment, update the external access configuration:
 
 ## License
 
-Copyright 2023 Monte Carlo Data, Inc. - See original CloudFormation template for full license terms.
+Copyright 2023 Monte Carlo Data, Inc.
