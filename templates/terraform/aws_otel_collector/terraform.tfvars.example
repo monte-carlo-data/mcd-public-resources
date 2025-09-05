@@ -1,0 +1,25 @@
+# Example Terraform variables file for Monte Carlo's OpenTelemetry Collector Service
+# Copy this file to terraform.tfvars and update the values
+
+# Required variables
+deployment_name           = "my-otel-collector"
+existing_vpc_id           = "vpc-12345678"
+existing_subnet_ids       = ["subnet-12345678", "subnet-87654321"]
+telemetry_data_bucket_arn = "arn:aws:s3:::my-telemetry-bucket"
+
+# Optional variables (uncomment and modify as needed)
+# existing_security_group_id = "sg-12345678"
+# grpc_port = 4317
+# http_port = 4318
+# task_desired_count = 2
+# task_cpu = 1024
+# task_memory = 2048
+# container_image = "otel/opentelemetry-collector-contrib:latest"
+# batch_timeout = "10s"
+# batch_size = 1024
+# memory_limit_mib = 1500
+# memory_spike_limit_mib = 512
+# external_id = "your-external-id"
+# external_access_principal = "arn:aws:iam::123456789012:root"
+# external_access_principal_type = "AWS"
+# external_access_role_name = "custom-role-name"
