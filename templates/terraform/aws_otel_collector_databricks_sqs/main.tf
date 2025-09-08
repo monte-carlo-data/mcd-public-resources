@@ -13,6 +13,9 @@ terraform {
 # Data sources
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
+data "aws_iam_role" "opentelemetry_collector_external_access_role" {
+  name = var.opentelemetry_collector_external_access_role_name
+}
 
 # Local values
 locals {
@@ -69,7 +72,7 @@ resource "aws_sqs_queue_policy" "databricks_access_policy" {
       {
         Effect = "Allow"
         Principal = {
-          AWS = var.opentelemetry_collector_external_access_role_arn
+          AWS = data.aws_iam_role.opentelemetry_collector_external_access_role.arn
         }
         Action = [
           "sqs:ReceiveMessage",
@@ -109,6 +112,6 @@ resource "aws_iam_policy" "opentelemetry_collector_sqs_access_policy" {
 
 # Attach the policy to the external access role
 resource "aws_iam_role_policy_attachment" "opentelemetry_collector_sqs_access_policy_attachment" {
-  role       = split("/", var.opentelemetry_collector_external_access_role_arn)[1]
+  role       = var.opentelemetry_collector_external_access_role_name
   policy_arn = aws_iam_policy.opentelemetry_collector_sqs_access_policy.arn
 }

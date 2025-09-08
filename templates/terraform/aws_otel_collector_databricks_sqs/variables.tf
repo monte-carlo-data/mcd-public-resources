@@ -9,11 +9,11 @@ variable "storage_bucket_arn" {
   }
 }
 
-variable "opentelemetry_collector_external_access_role_arn" {
-  description = "The ARN of the IAM role for external access to the OpenTelemetry S3 bucket"
+variable "opentelemetry_collector_external_access_role_name" {
+  description = "The name of the IAM role for external access to the OpenTelemetry S3 bucket"
   type        = string
   validation {
-    condition     = can(regex("^arn:aws:iam::.*:role/.*$", var.opentelemetry_collector_external_access_role_arn))
-    error_message = "Must be a valid IAM role ARN"
+    condition     = can(regex("^[a-zA-Z0-9+=,.@_-]+$", var.opentelemetry_collector_external_access_role_name))
+    error_message = "Must be a valid IAM role name"
   }
 }
