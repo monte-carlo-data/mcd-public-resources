@@ -40,6 +40,11 @@ output "opentelemetry_collector_external_access_role_arn" {
   value       = module.opentelemetry_collector.opentelemetry_collector_external_access_role_arn
 }
 
+output "opentelemetry_collector_external_access_role_name" {
+  description = "The name of the IAM role for external access to the OpenTelemetry S3 bucket"
+  value       = module.opentelemetry_collector.opentelemetry_collector_external_access_role_name
+}
+
 output "opentelemetry_collector_security_group_id" {
   description = "The ID of the security group for the OpenTelemetry Collector"
   value       = module.opentelemetry_collector.opentelemetry_collector_security_group_id
