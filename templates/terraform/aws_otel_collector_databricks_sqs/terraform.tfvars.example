@@ -1,0 +1,6 @@
+# Example Terraform variables file for Monte Carlo SQS queue for Databricks integration with OpenTelemetry Collector
+# Copy this file to terraform.tfvars and update the values
+
+# Required variables
+storage_bucket_arn = "arn:aws:s3:::my-telemetry-bucket"
+opentelemetry_collector_external_access_role_arn = "arn:aws:iam::123456789012:role/my-external-access-role"
