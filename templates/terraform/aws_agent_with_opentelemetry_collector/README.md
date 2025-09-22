@@ -6,7 +6,7 @@ This Terraform module deploys a Monte Carlo Agent, Data Store, and OpenTelemetry
 
 This module creates:
 - A Monte Carlo Agent using the official Terraform module (includes S3 storage bucket)
-- An OpenTelemetry Collector using the local `aws_otel_collector` module
+- An OpenTelemetry Collector using the `monte-carlo-data/otel-collector/aws` module
 - All necessary IAM roles and security groups
 
 ## Prerequisites
@@ -53,7 +53,7 @@ This module creates:
 | Name | Source | Version |
 |------|--------|---------|
 | agent | monte-carlo-data/mcd-agent/aws | 1.0.1 |
-| opentelemetry_collector | ../aws_otel_collector | n/a |
+| opentelemetry_collector | monte-carlo-data/otel-collector/aws | 0.1.0 |
 
 ## Inputs
 
