@@ -43,7 +43,7 @@ module "agent" {
 # OpenTelemetry Collector Module
 module "opentelemetry_collector" {
   source  = "monte-carlo-data/otel-collector/aws"
-  version = "0.1.0"
+  version = "0.1.1"
 
   deployment_name                = var.deployment_name
   existing_vpc_id                = var.existing_vpc_id
