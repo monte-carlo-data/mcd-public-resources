@@ -2,7 +2,7 @@
 # Copyright 2023 Monte Carlo Data, Inc.
 
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.9.0"
 
   required_providers {
     aws = {
@@ -42,7 +42,8 @@ module "agent" {
 
 # OpenTelemetry Collector Module
 module "opentelemetry_collector" {
-  source = "../aws_otel_collector"
+  source  = "monte-carlo-data/otel-collector/aws"
+  version = "0.1.1"
 
   deployment_name                = var.deployment_name
   existing_vpc_id                = var.existing_vpc_id
