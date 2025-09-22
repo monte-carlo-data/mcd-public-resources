@@ -11,7 +11,7 @@ This module creates:
 
 ## Prerequisites
 
-- Terraform >= 1.0
+- Terraform >= 1.9.0
 - AWS CLI configured with appropriate permissions
 - Existing VPC with at least 2 private subnets
 
