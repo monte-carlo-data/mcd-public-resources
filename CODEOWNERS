@@ -2,8 +2,8 @@
 * @monte-carlo-data/apollo
 
 # OpenTelemetry team permissions
-templates/terraform/aws_agent_with_opentelemetry_collector/ @monte-carlo-data/opentelemetry
-templates/terraform/aws_otel_collector_databricks_sqs/ @monte-carlo-data/opentelemetry
-templates/cloudformation/aws_agent_with_opentelemetry_collector.yaml @monte-carlo-data/opentelemetry
-templates/cloudformation/aws_otel_collector_databricks_sqs.yaml @monte-carlo-data/opentelemetry
-templates/cloudformation/aws_otel_collector_ecs.yaml @monte-carlo-data/opentelemetry
+/templates/terraform/aws_agent_with_opentelemetry_collector/ @monte-carlo-data/opentelemetry
+/templates/terraform/aws_otel_collector_databricks_sqs/ @monte-carlo-data/opentelemetry
+/templates/cloudformation/aws_agent_with_opentelemetry_collector.yaml @monte-carlo-data/opentelemetry
+/templates/cloudformation/aws_otel_collector_databricks_sqs.yaml @monte-carlo-data/opentelemetry
+/templates/cloudformation/aws_otel_collector_ecs.yaml @monte-carlo-data/opentelemetry
