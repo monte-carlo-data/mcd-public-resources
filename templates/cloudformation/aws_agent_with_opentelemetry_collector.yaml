@@ -198,6 +198,8 @@ Resources:
   SNSTopicPolicy:
     Condition: IsSNSNotification
     Properties:
+      Topics:
+        - !Ref OpenTelemetryCollectorExternalNotificationChannelArn
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
