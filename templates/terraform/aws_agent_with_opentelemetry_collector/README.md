@@ -53,7 +53,7 @@ This module creates:
 | Name | Source | Version |
 |------|--------|---------|
 | agent | monte-carlo-data/mcd-agent/aws | 1.0.1 |
-| opentelemetry_collector | monte-carlo-data/otel-collector/aws | 0.1.1 |
+| opentelemetry_collector | monte-carlo-data/otel-collector/aws | 0.2.0 |
 
 ## Inputs
 
