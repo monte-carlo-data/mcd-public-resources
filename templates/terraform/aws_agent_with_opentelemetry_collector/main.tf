@@ -107,3 +107,28 @@ resource "aws_s3_bucket_notification" "storage_notification_sns" {
     filter_prefix = "mcd/otel-collector/"
   }
 }
+
+# SNS Topic Policy for S3 bucket notifications (conditional)
+resource "aws_sns_topic_policy" "s3_notification_policy" {
+  count = (local.is_sns_notification && !local.use_existing_telemetry_data_bucket) ? 1 : 0
+  arn   = var.opentelemetry_collector_external_notification_channel_arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action   = "SNS:Publish"
+        Resource = var.opentelemetry_collector_external_notification_channel_arn
+        Condition = {
+          ArnLike = {
+            "aws:SourceArn" = module.agent.mcd_agent_storage_bucket_arn
+          }
+        }
+      }
+    ]
+  })
+}
