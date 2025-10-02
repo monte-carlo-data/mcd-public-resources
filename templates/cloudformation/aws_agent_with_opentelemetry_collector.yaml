@@ -103,6 +103,9 @@ Conditions:
   IsSQSNotification: !And
     - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
     - !Equals [!Select [2, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "sqs"]
+  IsSNSNotification: !And
+    - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
+    - !Equals [!Select [2, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "sns"]
 Resources:
   Agent:
     Type: AWS::CloudFormation::Stack
@@ -192,6 +195,21 @@ Resources:
                         Value: mcd/otel-collector/
         - !Ref AWS::NoValue
     Type: AWS::S3::Bucket
+  SNSTopicPolicy:
+    Condition: IsSNSNotification
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: SNS:Publish
+            Resource: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !GetAtt Storage.Arn
+    Type: AWS::SNS::TopicPolicy
   StorageSSLPolicy:
     Properties:
       Bucket: !Ref Storage
