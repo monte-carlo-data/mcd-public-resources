@@ -80,11 +80,11 @@ Parameters:
     AllowedPattern: '^(|N/A|[0-9]{12}|arn:aws:.*:.*)$'
     ConstraintDescription: Must be either empty, N/A, a 12-digit AWS account ID, or a valid AWS ARN
   OpenTelemetryCollectorExternalNotificationChannelArn:
-    Description: SQS Queue ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the CF stack is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery).
+    Description: SQS Queue ARN or SNS Topic ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the CF stack is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery).
     Type: String
     Default: "N/A"
-    AllowedPattern: '^(|N/A|arn:aws:sqs:[^:]+:[0-9]{12}:[^:]+)$'
-    ConstraintDescription: Must be either empty, N/A, or a valid SQS ARN (arn:aws:sqs:region:account:queue-name)
+    AllowedPattern: '^(|N/A|arn:aws:(sqs|sns):[^:]+:[0-9]{12}:[^:]+)$'
+    ConstraintDescription: Must be either empty, N/A, a valid SQS ARN (arn:aws:sqs:region:account:queue-name), or a valid SNS ARN (arn:aws:sns:region:account:topic-name)
   OpenTelemetryCollectorImage:
     Description: The image URI for the OpenTelemetry Collector container image.
     Type: String
@@ -100,6 +100,12 @@ Parameters:
 Conditions:
   UseExistingTelemetryDataBucket: !Not [!Equals [!Ref OpenTelemetryCollectorExistingBucketArn, "N/A"]]
   HasNotificationChannel: !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
+  IsSQSNotification: !And
+    - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
+    - !Equals [!Select [2, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "sqs"]
+  IsSNSNotification: !And
+    - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
+    - !Equals [!Select [2, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "sns"]
 Resources:
   Agent:
     Type: AWS::CloudFormation::Stack
@@ -155,21 +161,38 @@ Resources:
             Status: Enabled
       NotificationConfiguration: !If
         - HasNotificationChannel
-        - QueueConfigurations:
-            - Event: s3:ObjectCreated:*
-              Queue: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
-              Filter:
-                S3Key:
-                  Rules:
-                    - Name: prefix
-                      Value: mcd/otel-collector/
-            - Event: s3:ObjectRemoved:*
-              Queue: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
-              Filter:
-                S3Key:
-                  Rules:
-                    - Name: prefix
-                      Value: mcd/otel-collector/
+        - !If
+          - IsSQSNotification
+          - QueueConfigurations:
+              - Event: s3:ObjectCreated:*
+                Queue: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+                Filter:
+                  S3Key:
+                    Rules:
+                      - Name: prefix
+                        Value: mcd/otel-collector/
+              - Event: s3:ObjectRemoved:*
+                Queue: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+                Filter:
+                  S3Key:
+                    Rules:
+                      - Name: prefix
+                        Value: mcd/otel-collector/
+          - TopicConfigurations:
+              - Event: s3:ObjectCreated:*
+                Topic: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+                Filter:
+                  S3Key:
+                    Rules:
+                      - Name: prefix
+                        Value: mcd/otel-collector/
+              - Event: s3:ObjectRemoved:*
+                Topic: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
+                Filter:
+                  S3Key:
+                    Rules:
+                      - Name: prefix
+                        Value: mcd/otel-collector/
         - !Ref AWS::NoValue
     Type: AWS::S3::Bucket
   StorageSSLPolicy:

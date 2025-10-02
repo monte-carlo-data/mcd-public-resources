@@ -21,6 +21,10 @@ locals {
   use_existing_telemetry_data_bucket = var.opentelemetry_collector_existing_bucket_arn != "N/A"
   has_notification_channel           = var.opentelemetry_collector_external_notification_channel_arn != "N/A"
 
+  # Detect notification channel type
+  is_sqs_notification = local.has_notification_channel && can(regex("^arn:aws:sqs:", var.opentelemetry_collector_external_notification_channel_arn))
+  is_sns_notification = local.has_notification_channel && can(regex("^arn:aws:sns:", var.opentelemetry_collector_external_notification_channel_arn))
+
   # Common tags
   common_tags = {
     Service  = var.deployment_name
@@ -76,14 +80,28 @@ resource "aws_s3_bucket_lifecycle_configuration" "otel_collector_lifecycle" {
   }
 }
 
-# S3 Bucket Notification Configuration for OpenTelemetry Collector (conditional)
-resource "aws_s3_bucket_notification" "storage_notification" {
-  count  = (local.has_notification_channel && !local.use_existing_telemetry_data_bucket) ? 1 : 0
+# S3 Bucket Notification Configuration for OpenTelemetry Collector - SQS (conditional)
+resource "aws_s3_bucket_notification" "storage_notification_sqs" {
+  count  = (local.is_sqs_notification && !local.use_existing_telemetry_data_bucket) ? 1 : 0
   bucket = module.agent.mcd_agent_storage_bucket_name
 
   queue {
     id        = "${var.deployment_name}-opentelemetry-collector-notifications"
     queue_arn = var.opentelemetry_collector_external_notification_channel_arn
+    events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+
+    filter_prefix = "mcd/otel-collector/"
+  }
+}
+
+# S3 Bucket Notification Configuration for OpenTelemetry Collector - SNS (conditional)
+resource "aws_s3_bucket_notification" "storage_notification_sns" {
+  count  = (local.is_sns_notification && !local.use_existing_telemetry_data_bucket) ? 1 : 0
+  bucket = module.agent.mcd_agent_storage_bucket_name
+
+  topic {
+    id        = "${var.deployment_name}-opentelemetry-collector-notifications"
+    topic_arn = var.opentelemetry_collector_external_notification_channel_arn
     events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
 
     filter_prefix = "mcd/otel-collector/"
