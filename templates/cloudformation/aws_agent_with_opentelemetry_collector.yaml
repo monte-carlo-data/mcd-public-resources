@@ -197,23 +197,6 @@ Resources:
                         Value: mcd/otel-collector/
         - !Ref AWS::NoValue
     Type: AWS::S3::Bucket
-  SNSTopicPolicy:
-    Condition: IsSNSNotification
-    Properties:
-      Topics:
-        - !Ref OpenTelemetryCollectorExternalNotificationChannelArn
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: s3.amazonaws.com
-            Action: SNS:Publish
-            Resource: !Ref OpenTelemetryCollectorExternalNotificationChannelArn
-            Condition:
-              ArnLike:
-                aws:SourceArn: !GetAtt Storage.Arn
-    Type: AWS::SNS::TopicPolicy
   StorageSSLPolicy:
     Properties:
       Bucket: !Ref Storage
