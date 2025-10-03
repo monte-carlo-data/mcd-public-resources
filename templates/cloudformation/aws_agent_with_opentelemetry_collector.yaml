@@ -1,5 +1,4 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Transform: AWS::LanguageExtensions
 Description: Sample template that deploys a Monte Carlo Agent, Data Store, and OpenTelemetry Collector.
 Metadata:
   License: >
@@ -105,10 +104,10 @@ Conditions:
     - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, ""]]
   IsSQSNotification: !And
     - !Condition HasNotificationChannel
-    - !Not [!Equals [!Length [!Split ["arn:aws:sqs", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], 1]]
+    - !Not [!Equals [!Select [0, !Split ["arn:aws:sqs", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], !Ref OpenTelemetryCollectorExternalNotificationChannelArn]]
   IsSNSNotification: !And
     - !Condition HasNotificationChannel
-    - !Not [!Equals [!Length [!Split ["arn:aws:sns", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], 1]]
+    - !Not [!Equals [!Select [0, !Split ["arn:aws:sns", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], !Ref OpenTelemetryCollectorExternalNotificationChannelArn]]
 Resources:
   Agent:
     Type: AWS::CloudFormation::Stack
