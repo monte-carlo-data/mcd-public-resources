@@ -93,12 +93,12 @@ variable "opentelemetry_collector_external_access_principal" {
 }
 
 variable "opentelemetry_collector_external_notification_channel_arn" {
-  description = "SQS Queue ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the Terraform deployment is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery)."
+  description = "SQS Queue ARN or SNS Topic ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the Terraform deployment is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery)."
   type        = string
   default     = "N/A"
   validation {
-    condition     = can(regex("^(|N/A|arn:aws:sqs:[^:]+:[0-9]{12}:[^:]+)$", var.opentelemetry_collector_external_notification_channel_arn))
-    error_message = "Must be either empty, N/A, or a valid SQS ARN (arn:aws:sqs:region:account:queue-name)"
+    condition     = can(regex("^(|N/A|arn:aws:(sqs|sns):[^:]+:[0-9]{12}:[^:]+)$", var.opentelemetry_collector_external_notification_channel_arn))
+    error_message = "Must be either empty, N/A, a valid SQS ARN (arn:aws:sqs:region:account:queue-name), or a valid SNS ARN (arn:aws:sns:region:account:topic-name)"
   }
 }
 
