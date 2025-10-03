@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
 Description: Sample template that deploys a Monte Carlo Agent, Data Store, and OpenTelemetry Collector.
 Metadata:
   License: >
@@ -99,17 +100,15 @@ Parameters:
     Default: "N/A"
 Conditions:
   UseExistingTelemetryDataBucket: !Not [!Equals [!Ref OpenTelemetryCollectorExistingBucketArn, "N/A"]]
-  HasNotificationChannel: !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
-  IsValidARN: !And
+  HasNotificationChannel: !And
     - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, "N/A"]]
     - !Not [!Equals [!Ref OpenTelemetryCollectorExternalNotificationChannelArn, ""]]
-    - !Equals [!Select [0, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "arn"]
   IsSQSNotification: !And
-    - !Condition IsValidARN
-    - !Equals [!Select [2, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "sqs"]
+    - !Condition HasNotificationChannel
+    - !Not [!Equals [!Length [!Split ["arn:aws:sqs", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], 1]]
   IsSNSNotification: !And
-    - !Condition IsValidARN
-    - !Equals [!Select [2, !Split [":", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], "sns"]
+    - !Condition HasNotificationChannel
+    - !Not [!Equals [!Length [!Split ["arn:aws:sns", !Ref OpenTelemetryCollectorExternalNotificationChannelArn]], 1]]
 Resources:
   Agent:
     Type: AWS::CloudFormation::Stack
