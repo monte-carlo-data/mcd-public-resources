@@ -30,7 +30,7 @@ Usage example (requires Terraform and the AWS CLI):
   AWS_DEFAULT_PROFILE=<Your AWS CLI Profile> terraform apply
 
 Inputs:
-  monte_carlo_cloud_account_id - The Monte Carlo AWS Account ID (default: 590183797493)
+  monte_carlo_cloud_account_id - The Monte Carlo AWS Account ID (Collection AWS account ID on the Account information page)
   data_store_region - AWS region to deploy resources (default: "us-east-1")
 
 Outputs:
@@ -63,12 +63,11 @@ provider "aws" {
 
 variable "monte_carlo_cloud_account_id" {
   description = <<EOF
-For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, 
-will automatically be on the V2 platform or newer. If you are using an older version of the platform, 
+For deployments on the V2 Platform, use the Collection AWS account id in the Account information page. Accounts created 
+after April 24th, 2024, will automatically be on the V2 platform or newer. If you are using an older version of the platform, 
 please contact your Monte Carlo representative for the ID.
 EOF
   type        = string
-  default     = "590183797493"
 }
 
 variable "data_store_region" {

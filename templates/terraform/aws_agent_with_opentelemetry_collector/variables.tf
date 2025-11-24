@@ -39,9 +39,8 @@ variable "existing_security_group_id" {
 }
 
 variable "cloud_account_id" {
-  description = "For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, will automatically be on the V2 platform or newer. If you are using an older version of the platform, please contact your Monte Carlo representative for the ID."
+  description = "For deployments on the V2 Platform, use the Collection AWS account ID in the Account information page. Accounts created after April 24th, 2024, will automatically be on the V2 platform or newer. If you are using an older version of the platform, please contact your Monte Carlo representative for the ID."
   type        = string
-  default     = "590183797493"
   validation {
     condition     = can(regex("^[0-9]{12}$", var.cloud_account_id))
     error_message = "Must be a valid 12-digit AWS account ID"

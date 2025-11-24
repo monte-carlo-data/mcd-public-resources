@@ -37,11 +37,10 @@ Parameters:
     ConstraintDescription: Must be either empty, N/A, or a valid security group ID (sg-xxxxxxxxx)
   MonteCarloCloudAccountId:
     Description: >
-      For deployments on the V2 Platform, use 590183797493. Accounts created after April 24th, 2024, 
-      will automatically be on the V2 platform or newer. If you are using an older version of the platform, 
+      For deployments on the V2 Platform, use the Collection AWS account ID from the Account information page. Accounts created 
+      after April 24th, 2024, will automatically be on the V2 platform or newer. If you are using an older version of the platform, 
       please contact your Monte Carlo representative for the ID.
     Type: String
-    Default: 590183797493
     AllowedPattern: '^[0-9]{12}$'
     ConstraintDescription: Must be a valid 12-digit AWS account ID
   AgentConcurrentExecutions:
