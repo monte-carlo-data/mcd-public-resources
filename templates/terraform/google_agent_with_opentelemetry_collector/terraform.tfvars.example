@@ -1,0 +1,66 @@
+# Example configuration for Monte Carlo Agent with OpenTelemetry Collector on GCP
+# Copy this file to terraform.tfvars and update the values as needed
+
+# =============================================================================
+# Required parameters
+# =============================================================================
+
+project_id      = "my-gcp-project-id"
+deployment_name = "mcd-agent-with-otel"
+region          = "us-central1"
+vpc_network     = "projects/my-gcp-project-id/global/networks/my-vpc"
+
+# =============================================================================
+# VPC Configuration
+# Provide either vpc_subnet (to create a new shared VPC connector) or existing_vpc_connector
+# =============================================================================
+
+vpc_subnet = "10.8.0.0/28"
+# existing_vpc_connector = "projects/my-gcp-project-id/locations/us-central1/connectors/my-connector"
+
+# =============================================================================
+# Agent Configuration
+# =============================================================================
+
+# generate_key = true  # Set to false to create the key outside of Terraform
+
+# =============================================================================
+# OpenTelemetry Collector - Container Configuration
+# =============================================================================
+
+# opentelemetry_collector_image     = "otel/opentelemetry-collector-contrib:latest"
+# opentelemetry_collector_grpc_port = 4317
+# opentelemetry_collector_http_port = 4318
+
+# =============================================================================
+# OpenTelemetry Collector - Cloud Run Configuration
+# =============================================================================
+
+# opentelemetry_collector_min_instances   = 1
+# opentelemetry_collector_max_instances   = 10
+# opentelemetry_collector_cpu             = "1"
+# opentelemetry_collector_memory          = "2Gi"
+# opentelemetry_collector_timeout_seconds = 300
+# opentelemetry_collector_concurrency     = 80
+
+# =============================================================================
+# OpenTelemetry Collector - OTEL Configuration
+# =============================================================================
+
+# opentelemetry_collector_batch_timeout          = "10s"
+# opentelemetry_collector_batch_size             = 1024
+# opentelemetry_collector_memory_limit_mib       = 1500
+# opentelemetry_collector_memory_spike_limit_mib = 512
+
+# =============================================================================
+# OpenTelemetry Collector - BigQuery Integration (optional)
+# =============================================================================
+
+# opentelemetry_collector_bigquery_table_id = "my-project.my_dataset.otel_traces"
+
+# =============================================================================
+# Protection Settings
+# =============================================================================
+
+# deletion_protection = true  # Set to false for dev/test environments
+
