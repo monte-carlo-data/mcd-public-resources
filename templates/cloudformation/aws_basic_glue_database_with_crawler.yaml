@@ -28,12 +28,10 @@ Parameters:
   S3BucketName:
     Type: String
     Description: "S3 bucket name containing the data"
-    Default: "my-default-bucket"
 
   S3Path:
     Type: String
     Description: "Path inside the S3 bucket to crawl"
-    Default: "/"
 
   GlueDatabaseName:
     Type: String
