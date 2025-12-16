@@ -23,3 +23,6 @@ remote_upgradable = true
 # opentelemetry_collector_image = "otel/opentelemetry-collector-contrib:latest"
 # opentelemetry_collector_existing_bucket_arn = "arn:aws:s3:::your-existing-bucket"
 # external_access_role_name = "your-custom-role-name"
+
+# Redshift integration configuration
+# deploy_redshift_resources = false  # Set to true to enable Redshift integration

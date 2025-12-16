@@ -37,11 +37,12 @@ module "agent" {
   source  = "monte-carlo-data/mcd-agent/aws"
   version = "1.0.3"
 
-  cloud_account_id  = var.cloud_account_id
-  private_subnets   = var.existing_subnet_ids
-  image             = var.agent_image_uri
-  region            = var.region
-  remote_upgradable = var.remote_upgradable
+  cloud_account_id        = var.cloud_account_id
+  private_subnets         = var.existing_subnet_ids
+  image                   = var.agent_image_uri
+  region                  = var.region
+  remote_upgradable       = var.remote_upgradable
+  create_s3_bucket_policy = !var.deploy_redshift_resources
 }
 
 # OpenTelemetry Collector Module
@@ -59,6 +60,7 @@ module "opentelemetry_collector" {
   external_access_principal_type = var.opentelemetry_collector_external_principal_type
   container_image                = var.opentelemetry_collector_image
   external_access_role_name      = var.external_access_role_name
+  deploy_redshift_resources      = var.deploy_redshift_resources
 }
 
 # S3 Bucket Lifecycle Configuration for OpenTelemetry Collector data (conditional)
@@ -106,4 +108,54 @@ resource "aws_s3_bucket_notification" "storage_notification_sns" {
 
     filter_prefix = "mcd/otel-collector/"
   }
+}
+
+# S3 Bucket Policy for SSL enforcement and Redshift integration (conditional)
+# When deploy_redshift_resources is true, this policy is deployed to enable Redshift zero-ETL integration
+# with the agent's storage bucket, including SSL enforcement and Redshift service permissions.
+# When false, the S3 bucket policy is managed by the Monte Carlo Agent module.
+resource "aws_s3_bucket_policy" "mcd_ssl_and_redshift_policy" {
+  count  = var.deploy_redshift_resources ? 1 : 0
+  bucket = module.agent.mcd_agent_storage_bucket_name
+  policy = jsonencode({
+    "Version" : "2012-10-17",
+    "Statement" : [
+      {
+        "Sid" : "DenyActionsWithoutSSL",
+        "Effect" : "Deny",
+        "Principal" : {
+          "AWS" : "*"
+        },
+        "Action" : "*",
+        "Resource" : [
+          module.agent.mcd_agent_storage_bucket_arn,
+          "${module.agent.mcd_agent_storage_bucket_arn}/*"
+        ],
+        "Condition" : {
+          "Bool" : {
+            "aws:SecureTransport" : "false"
+          }
+        }
+      },
+      {
+        "Sid" : "Auto-Copy-Policy-01",
+        "Effect" : "Allow",
+        "Principal" : {
+          "Service" : "redshift.amazonaws.com"
+        },
+        "Action" : [
+          "s3:GetBucketNotification",
+          "s3:PutBucketNotification",
+          "s3:GetBucketLocation"
+        ],
+        "Resource" : module.agent.mcd_agent_storage_bucket_arn,
+        "Condition" : {
+          "StringLike" : {
+            "aws:SourceArn" : "arn:aws:redshift:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:integration:*",
+            "aws:SourceAccount" : data.aws_caller_identity.current.account_id
+          }
+        }
+      }
+    ]
+  })
 }
