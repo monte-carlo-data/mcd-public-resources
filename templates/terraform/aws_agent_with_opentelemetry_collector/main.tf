@@ -35,7 +35,7 @@ locals {
 # Monte Carlo Agent Module
 module "agent" {
   source  = "monte-carlo-data/mcd-agent/aws"
-  version = "1.0.3"
+  version = "1.0.4"
 
   cloud_account_id        = var.cloud_account_id
   private_subnets         = var.existing_subnet_ids
