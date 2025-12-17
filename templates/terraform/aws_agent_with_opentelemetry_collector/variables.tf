@@ -118,3 +118,9 @@ variable "external_access_role_name" {
   type        = string
   default     = "N/A"
 }
+
+variable "deploy_redshift_resources" {
+  description = "Whether to deploy Redshift-specific resources. When true, creates a bucket policy Redshift notification configuration access and deploys the Otel Collector's Lambda UDF."
+  type        = bool
+  default     = false
+}
