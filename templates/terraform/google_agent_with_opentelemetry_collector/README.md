@@ -56,7 +56,7 @@ This module creates:
 | Name | Source | Version |
 |------|--------|---------|
 | agent | monte-carlo-data/mcd-agent/google | 1.1.0 |
-| opentelemetry_collector | monte-carlo-data/otel-collector/google | 0.0.1 |
+| opentelemetry_collector | monte-carlo-data/otel-collector/google | 0.0.2 |
 
 ## Required Inputs
 
