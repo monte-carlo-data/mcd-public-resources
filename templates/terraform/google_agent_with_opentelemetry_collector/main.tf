@@ -67,7 +67,7 @@ module "agent" {
 # OpenTelemetry Collector Module
 module "opentelemetry_collector" {
   source  = "monte-carlo-data/otel-collector/google"
-  version = "0.0.1"
+  version = "0.0.2"
 
   project_id      = var.project_id
   deployment_name = var.deployment_name
