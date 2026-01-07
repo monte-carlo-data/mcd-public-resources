@@ -49,17 +49,18 @@ module "opentelemetry_collector" {
   source  = "monte-carlo-data/otel-collector/aws"
   version = "0.4.0"
 
-  deployment_name                = var.deployment_name
-  existing_vpc_id                = var.existing_vpc_id
-  existing_subnet_ids            = var.existing_subnet_ids
-  telemetry_data_bucket_arn      = local.use_existing_telemetry_data_bucket ? var.opentelemetry_collector_existing_bucket_arn : module.agent.mcd_agent_storage_bucket_arn
-  existing_security_group_id     = var.existing_security_group_id
-  external_id                    = var.opentelemetry_collector_external_id
-  external_access_principal      = var.opentelemetry_collector_external_access_principal
-  external_access_principal_type = var.opentelemetry_collector_external_principal_type
-  container_image                = var.opentelemetry_collector_image
-  external_access_role_name      = var.external_access_role_name
-  deploy_athena_resources        = var.deploy_athena_resources
+  deployment_name                                  = var.deployment_name
+  existing_vpc_id                                  = var.existing_vpc_id
+  existing_subnet_ids                              = var.existing_subnet_ids
+  telemetry_data_bucket_arn                        = local.use_existing_telemetry_data_bucket ? var.opentelemetry_collector_existing_bucket_arn : module.agent.mcd_agent_storage_bucket_arn
+  existing_security_group_id                       = var.existing_security_group_id
+  external_id                                      = var.opentelemetry_collector_external_id
+  external_access_principal                        = var.opentelemetry_collector_external_access_principal
+  external_access_principal_type                   = var.opentelemetry_collector_external_principal_type
+  container_image                                  = var.opentelemetry_collector_image
+  external_access_role_name                        = var.external_access_role_name
+  deploy_athena_resources                          = var.deploy_athena_resources
+  telemetry_data_bucket_notification_sns_topic_arn = local.is_sns_notification ? var.opentelemetry_collector_external_notification_channel_arn : null
 }
 
 # S3 Bucket Lifecycle Configuration for OpenTelemetry Collector data (conditional)
