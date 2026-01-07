@@ -36,3 +36,5 @@ terraform.rc
 # IDE files
 .idea/
 /.venv/
+
+.terraform.lock.hcl
