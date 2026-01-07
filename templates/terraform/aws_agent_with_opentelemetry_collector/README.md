@@ -70,7 +70,7 @@ This module creates:
 | opentelemetry_collector_external_id | External ID for OpenTelemetry Collector S3 access | `string` | `"N/A"` | no |
 | opentelemetry_collector_external_principal_type | Type of principal for external access role | `string` | `"AWS"` | no |
 | opentelemetry_collector_external_access_principal | AWS Principal allowed to assume the external access role | `string` | `"N/A"` | no |
-| opentelemetry_collector_external_notification_channel_arn | SQS Queue ARN to receive S3 event notifications | `string` | `"N/A"` | no |
+| opentelemetry_collector_external_notification_channel_arn | SQS Queue ARN or SNS Topic ARN to receive S3 event notifications. When Athena resources are deployed, can be set to an SNS topic ARN to subscribe the Glue crawler to. If not provided when Athena resources are deployed, a SNS topic will be created and S3 notifications will be configured for the provided bucket. | `string` | `"N/A"` | no |
 | opentelemetry_collector_image | The image URI for the OpenTelemetry Collector container image | `string` | `"otel/opentelemetry-collector-contrib:latest"` | no |
 | opentelemetry_collector_existing_bucket_arn | ARN of an existing S3 bucket to store OpenTelemetry data | `string` | `"N/A"` | no |
 | external_access_role_name | Custom name of the external access role | `string` | `"N/A"` | no |
@@ -102,6 +102,8 @@ The module uses the S3 bucket created by the Monte Carlo Agent module, which inc
 
 When `deploy_athena_resources` is set to `true`:
 - The OpenTelemetry Collector's Lambda UDF is deployed for Athena integration
+- If `opentelemetry_collector_external_notification_channel_arn` is set to an SNS topic ARN, the Glue crawler will be subscribed to that topic
+- If `opentelemetry_collector_external_notification_channel_arn` is not provided, a SNS topic will be created and S3 notifications will be configured for the provided bucket
 
 ### OpenTelemetry Collector Data Management
 - **Lifecycle Policy**: Data in `mcd/otel-collector/` prefix expires after 30 days
