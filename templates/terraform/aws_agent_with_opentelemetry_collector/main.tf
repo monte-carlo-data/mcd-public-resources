@@ -60,7 +60,7 @@ module "opentelemetry_collector" {
   container_image                                  = var.opentelemetry_collector_image
   external_access_role_name                        = var.external_access_role_name
   deploy_athena_resources                          = var.deploy_athena_resources
-  telemetry_data_bucket_notification_sns_topic_arn = local.is_sns_notification ? var.opentelemetry_collector_external_notification_channel_arn : null
+  telemetry_data_bucket_notification_sns_topic_arn = local.is_sns_notification ? var.opentelemetry_collector_external_notification_channel_arn : ""
 }
 
 # S3 Bucket Lifecycle Configuration for OpenTelemetry Collector data (conditional)
