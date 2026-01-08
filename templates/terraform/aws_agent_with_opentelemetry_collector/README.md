@@ -70,11 +70,11 @@ This module creates:
 | opentelemetry_collector_external_id | External ID for OpenTelemetry Collector S3 access | `string` | `"N/A"` | no |
 | opentelemetry_collector_external_principal_type | Type of principal for external access role | `string` | `"AWS"` | no |
 | opentelemetry_collector_external_access_principal | AWS Principal allowed to assume the external access role | `string` | `"N/A"` | no |
-| opentelemetry_collector_external_notification_channel_arn | SQS Queue ARN to receive S3 event notifications | `string` | `"N/A"` | no |
+| opentelemetry_collector_external_notification_channel_arn | SQS Queue ARN or SNS Topic ARN to receive S3 event notifications. When Athena resources are deployed, can be set to an SNS topic ARN to subscribe the Glue crawler to. If not provided when Athena resources are deployed, a SNS topic will be created and S3 notifications will be configured for the provided bucket. | `string` | `"N/A"` | no |
 | opentelemetry_collector_image | The image URI for the OpenTelemetry Collector container image | `string` | `"otel/opentelemetry-collector-contrib:latest"` | no |
 | opentelemetry_collector_existing_bucket_arn | ARN of an existing S3 bucket to store OpenTelemetry data | `string` | `"N/A"` | no |
 | external_access_role_name | Custom name of the external access role | `string` | `"N/A"` | no |
-| deploy_redshift_resources | Whether to deploy Redshift-specific resources. When true, creates a bucket policy with Redshift notification configuration access and deploys the Otel Collector's Lambda UDF | `bool` | `false` | no |
+| deploy_athena_resources | Whether to deploy Athena-specific resources. When true, deploys the Otel Collector's Lambda UDF | `bool` | `false` | no |
 
 ## Outputs
 
@@ -98,13 +98,12 @@ The module uses the S3 bucket created by the Monte Carlo Agent module, which inc
 - SSL/TLS enforcement policy
 - Lifecycle policies for data management
 
-### Redshift Integration
+### Athena Integration
 
-When `deploy_redshift_resources` is set to `true`:
-- A custom S3 bucket policy is deployed with SSL enforcement and Redshift integration permissions
-- The Agent module's default bucket policy creation is disabled
-- Redshift service is granted permissions to configure bucket notifications for zero-ETL integration
-- The OpenTelemetry Collector's Lambda UDF is deployed for Redshift integration
+When `deploy_athena_resources` is set to `true`:
+- The OpenTelemetry Collector's Lambda UDF is deployed for Athena integration
+- If `opentelemetry_collector_external_notification_channel_arn` is set to an SNS topic ARN, the Glue crawler will be subscribed to that topic
+- If `opentelemetry_collector_external_notification_channel_arn` is not provided, a SNS topic will be created and S3 notifications will be configured for the provided bucket
 
 ### OpenTelemetry Collector Data Management
 - **Lifecycle Policy**: Data in `mcd/otel-collector/` prefix expires after 30 days
@@ -133,8 +132,6 @@ Agent module
 - Additional lifecycle policies and S3 notifications for OpenTelemetry collector data are 
 configured by this module
 - The external access role name defaults to `mcd-otel-collector-EAR` if not specified
-- When `deploy_redshift_resources` is `true`, the S3 bucket policy is managed by this module 
-instead of the Agent module to include Redshift integration permissions
 
 ## License
 

@@ -92,7 +92,7 @@ variable "opentelemetry_collector_external_access_principal" {
 }
 
 variable "opentelemetry_collector_external_notification_channel_arn" {
-  description = "SQS Queue ARN or SNS Topic ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the Terraform deployment is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery)."
+  description = "SQS Queue ARN or SNS Topic ARN to receive S3 event notifications for telemetry data. If left empty, no notifications will be configured. Update this value later after the Terraform deployment is created to the value provided by your warehouse (e.g. Snowflake, Databricks, BigQuery). When Athena resources are deployed (deploy_athena_resources = true), this can be set to an SNS topic ARN to subscribe the Glue crawler to. If not provided when Athena resources are deployed, a SNS topic will be created and S3 notifications will be configured for the provided bucket."
   type        = string
   default     = "N/A"
   validation {
@@ -119,8 +119,8 @@ variable "external_access_role_name" {
   default     = "N/A"
 }
 
-variable "deploy_redshift_resources" {
-  description = "Whether to deploy Redshift-specific resources. When true, creates a bucket policy Redshift notification configuration access and deploys the Otel Collector's Lambda UDF."
+variable "deploy_athena_resources" {
+  description = "Whether to deploy Athena-specific resources. When true, deploys the Otel Collector's Lambda UDF."
   type        = bool
   default     = false
 }
