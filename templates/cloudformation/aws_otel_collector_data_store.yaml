@@ -49,6 +49,17 @@ Parameters:
     Description: Custom name of the external access role. If left empty, will use the default name of "{AWS::StackName}-EAR".
     Type: String
     Default: "N/A"
+  McdOtelCollectorTaskRoleArn:
+    Description: Task role ARN allowed to write OpenTelemetry data to the S3 bucket.
+    Type: String
+    AllowedPattern: '^arn:aws:iam::[0-9]{12}:role\/.+$'
+    ConstraintDescription: Must be a valid IAM role ARN.
+  VpcExternalId:
+    Description: Optional VPC endpoint ID that must be used for bucket writes.
+    Type: String
+    Default: "N/A"
+    AllowedPattern: '^(|N/A|vpce-[0-9a-f]+)$'
+    ConstraintDescription: Must be either empty, N/A, or a valid VPC endpoint ID (vpce-xxxxxxxx).
 
 Conditions:
   HasNotificationChannel: !And
@@ -60,6 +71,9 @@ Conditions:
   UseCurrentAccount: !Equals [!Ref ExternalAccessPrincipal, "N/A"]
   UseAWSPrincipal: !Equals [!Ref ExternalAccessPrincipalType, "AWS"]
   UseCustomExternalAccessRoleName: !Not [!Equals [!Ref ExternalAccessRoleName, "N/A"]]
+  UseVpcEndpoint: !And
+    - !Not [!Equals [!Ref VpcExternalId, "N/A"]]
+    - !Not [!Equals [!Ref VpcExternalId, ""]]
 
 Resources:
   Storage:
@@ -139,6 +153,22 @@ Resources:
               Bool:
                 aws:SecureTransport:
                   - false
+          - Sid: AllowTaskRoleWrite
+            Effect: Allow
+            Principal:
+              AWS: !Ref McdOtelCollectorTaskRoleArn
+            Action:
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt Storage.Arn
+              - !Sub "${Storage.Arn}/mcd/otel-collector/*"
+            Condition: !If
+              - UseVpcEndpoint
+              - StringEquals:
+                  aws:SourceVpce: !Ref VpcExternalId
+              - !Ref AWS::NoValue
     Type: AWS::S3::BucketPolicy
   ExternalAccessS3ReadOnlyPolicy:
     Type: AWS::IAM::Policy
