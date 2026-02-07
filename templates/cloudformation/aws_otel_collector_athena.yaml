@@ -37,12 +37,6 @@ Parameters:
     AllowedPattern: '^arn:aws:s3:::.*$'
     ConstraintDescription: Must be a valid S3 bucket ARN
 
-  TelemetryDataBucketName:
-    Type: String
-    Description: Name of the S3 bucket containing telemetry data (extracted from the ARN)
-    AllowedPattern: '^[a-z0-9][a-z0-9-]*[a-z0-9]$'
-    ConstraintDescription: Must be a valid S3 bucket name
-
   SNSTopicArn:
     Type: String
     Description: ARN of an existing SNS topic to use for notifications. If left empty, a new SNS topic will be created.
@@ -71,13 +65,13 @@ Parameters:
 
 Conditions:
   UseExistingSNS: !Not [!Equals [!Ref SNSTopicArn, ""]]
+  CreateSNS: !Equals [!Ref SNSTopicArn, ""]
 
 Resources:
   # Glue Classifier
   GrokClassifier:
     Type: AWS::Glue::Classifier
     Properties:
-      Name: !Sub "${DeploymentName}-grok-classifier"
       GrokClassifier:
         Classification: grok
         GrokPattern: "%%{GREEDYDATA:value}"
@@ -85,14 +79,14 @@ Resources:
   # SNS Topic (only if not provided)
   TelemetryNotificationsTopic:
     Type: AWS::SNS::Topic
-    Condition: !Not [!Condition UseExistingSNS]
+    Condition: CreateSNS
     Properties:
       TopicName: !Sub "${DeploymentName}-telemetry-notifications"
 
   # SNS Topic Policy to allow S3 to publish (only if SNS topic was created)
   TelemetryNotificationsTopicPolicy:
     Type: AWS::SNS::TopicPolicy
-    Condition: !Not [!Condition UseExistingSNS]
+    Condition: CreateSNS
     Properties:
       Topics:
         - !Ref TelemetryNotificationsTopic
@@ -159,27 +153,6 @@ Resources:
       Protocol: sqs
       Endpoint: !GetAtt CrawlerQueue.Arn
 
-  # S3 Bucket Notification Configuration for OpenTelemetry Collector - SNS (only if SNS topic was created)
-  StorageNotificationSNS:
-    Type: AWS::S3::BucketNotification
-    Condition: !Not [!Condition UseExistingSNS]
-    DependsOn:
-      - TelemetryNotificationsTopic
-      - TelemetryNotificationsTopicPolicy
-    Properties:
-      Bucket: !Ref TelemetryDataBucketName
-      TopicConfigurations:
-        - Id: !Sub "${DeploymentName}-glue-crawler-sns-notification"
-          TopicArn: !Ref TelemetryNotificationsTopic
-          Event: 
-            - s3:ObjectCreated:*
-            - s3:ObjectRemoved:*
-          Filter:
-            S3Key:
-              Rules:
-                - Name: prefix
-                  Value: mcd/otel-collector/
-
   # IAM Role for Glue Crawler
   GlueCrawlerRole:
     Type: AWS::IAM::Role
@@ -243,7 +216,9 @@ Resources:
         - !Ref GrokClassifier
       Targets:
         S3Targets:
-          - Path: !Sub "s3://${TelemetryDataBucketName}/mcd/otel-collector/traces/"
+          - Path: !Sub 
+              - "s3://${BucketName}/mcd/otel-collector/traces/"
+              - BucketName: !Select [5, !Split [":", !Ref TelemetryDataBucketArn]]
             EventQueueArn: !GetAtt CrawlerQueue.Arn
       SchemaChangePolicy:
         DeleteBehavior: LOG
@@ -252,7 +227,7 @@ Resources:
         RecrawlBehavior: CRAWL_EVENT_MODE
       Schedule:
         ScheduleExpression: "cron(*/30 * * * ? *)"
-      Configuration: !Sub |
+      Configuration: |
         {
           "Version": 1.0,
           "CrawlerOutput": {
