@@ -24,13 +24,6 @@ Metadata:
     protections over or in connection with any Software of Derivatives.
 
 Parameters:
-  DeploymentName:
-    Type: String
-    Description: Name of the deployment (used as prefix for naming resources)
-    Default: mcd-agent-with-otel
-    AllowedPattern: '^[a-zA-Z0-9-]+$'
-    ConstraintDescription: Deployment name must contain only alphanumeric characters and hyphens.
-
   TelemetryDataBucketArn:
     Type: String
     Description: ARN of the S3 bucket containing telemetry data
@@ -47,7 +40,7 @@ Parameters:
   LambdaUDFImageUri:
     Type: String
     Description: URI of the Lambda UDF container image
-    Default: ""
+    Default: "752656882040.dkr.ecr.us-east-1.amazonaws.com/mcd-otel-aws-athena-lambda-udf:latest"
 
   LambdaUDFTimeout:
     Type: Number
@@ -81,7 +74,7 @@ Resources:
     Type: AWS::SNS::Topic
     Condition: CreateSNS
     Properties:
-      TopicName: !Sub "${DeploymentName}-telemetry-notifications"
+      TopicName: !Sub "${AWS::StackName}-telemetry-notifications"
 
   # SNS Topic Policy to allow S3 to publish (only if SNS topic was created)
   TelemetryNotificationsTopicPolicy:
@@ -106,7 +99,7 @@ Resources:
   CrawlerQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !Sub "${DeploymentName}-glue-crawler-queue"
+      QueueName: !Sub "${AWS::StackName}-glue-crawler-queue"
       MessageRetentionPeriod: 1209600  # 14 days
       ReceiveMessageWaitTimeSeconds: 20  # Long polling
 
@@ -157,7 +150,7 @@ Resources:
   GlueCrawlerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${DeploymentName}-glue-crawler-role"
+      RoleName: !Sub "${AWS::StackName}-glue-crawler-role"
       Path: "/"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -169,7 +162,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
       Policies:
-        - PolicyName: !Sub "${DeploymentName}-glue-crawler-s3-policy"
+        - PolicyName: !Sub "${AWS::StackName}-glue-crawler-s3-policy"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -181,7 +174,7 @@ Resources:
                 Resource:
                   - !Ref TelemetryDataBucketArn
                   - !Sub "${TelemetryDataBucketArn}/*"
-        - PolicyName: !Sub "${DeploymentName}-glue-crawler-sqs-policy"
+        - PolicyName: !Sub "${AWS::StackName}-glue-crawler-sqs-policy"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -202,14 +195,14 @@ Resources:
     Properties:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
-        Name: !Sub "${DeploymentName}-telemetry-db"
+        Name: !Sub "${AWS::StackName}-telemetry-db"
         Description: "Database for OpenTelemetry telemetry data"
 
   # Glue Crawler
   TelemetryCrawler:
     Type: AWS::Glue::Crawler
     Properties:
-      Name: !Sub "${DeploymentName}-telemetry-crawler"
+      Name: !Sub "${AWS::StackName}-telemetry-crawler"
       Role: !GetAtt GlueCrawlerRole.Arn
       DatabaseName: !Ref TelemetryDatabase
       Classifiers:
@@ -245,7 +238,7 @@ Resources:
   LambdaUDFRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${DeploymentName}-lambda-udf-role"
+      RoleName: !Sub "${AWS::StackName}-lambda-udf-role"
       Path: "/"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -257,7 +250,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: !Sub "${DeploymentName}-lambda-udf-bedrock-policy"
+        - PolicyName: !Sub "${AWS::StackName}-lambda-udf-bedrock-policy"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
