@@ -78,6 +78,11 @@ Conditions:
 Resources:
   Storage:
     Properties:
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
