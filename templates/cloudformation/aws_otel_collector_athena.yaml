@@ -292,7 +292,7 @@ Resources:
   AthenaUDF:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: mcd-agent-observability-bedrock-udf-2
+      FunctionName: mcd-agent-observability-bedrock-udf
       Role: !GetAtt LambdaUDFRole.Arn
       PackageType: Image
       Code:
