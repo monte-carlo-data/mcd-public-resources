@@ -67,7 +67,7 @@ Resources:
     Properties:
       GrokClassifier:
         Classification: grok
-        GrokPattern: "%%{GREEDYDATA:value}"
+        GrokPattern: "%{GREEDYDATA:value}"
 
   # SNS Topic (only if not provided)
   TelemetryNotificationsTopic:
@@ -267,7 +267,7 @@ Resources:
   AthenaUDF:
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: mcd-agent-observability-bedrock-udf
+      FunctionName: mcd-agent-observability-bedrock-udf-2
       Role: !GetAtt LambdaUDFRole.Arn
       PackageType: Image
       Code:
