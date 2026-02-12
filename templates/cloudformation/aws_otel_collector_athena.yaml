@@ -75,6 +75,11 @@ Resources:
     Condition: CreateSNS
     Properties:
       TopicName: !Sub "${AWS::StackName}-telemetry-notifications"
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
 
   # SNS Topic Policy to allow S3 to publish (only if SNS topic was created)
   TelemetryNotificationsTopicPolicy:
@@ -102,6 +107,11 @@ Resources:
       QueueName: !Sub "${AWS::StackName}-glue-crawler-queue"
       MessageRetentionPeriod: 1209600  # 14 days
       ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
 
   # SQS Queue Policy for SNS subscription
   CrawlerQueuePolicy:
@@ -188,6 +198,11 @@ Resources:
                   - sqs:SetQueueAttributes
                   - sqs:PurgeQueue
                 Resource: !GetAtt CrawlerQueue.Arn
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
 
   # Glue Database
   TelemetryDatabase:
@@ -233,6 +248,11 @@ Resources:
             "TableGroupingPolicy": "CombineCompatibleSchemas"
           }
         }
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
 
   # IAM Role for Lambda UDF
   LambdaUDFRole:
@@ -262,6 +282,11 @@ Resources:
                 Resource:
                   - "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
                   - "arn:aws:bedrock:*:*:inference-profile/*anthropic.claude-*"
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
 
   # Lambda Function for Athena UDF
   AthenaUDF:
@@ -277,6 +302,11 @@ Resources:
       ImageConfig:
         Command:
           - handler.lambda_handler
+      Tags:
+        - Key: Service
+          Value: "mcd-otel-collector"
+        - Key: Provider
+          Value: "monte-carlo"
 
 Outputs:
   GlueDatabaseName:
