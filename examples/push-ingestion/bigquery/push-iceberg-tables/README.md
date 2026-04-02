@@ -23,8 +23,10 @@ in the [mcd-agent-toolkit](https://github.com/monte-carlo-data/mcd-agent-toolkit
 1. **Python 3.9+**
 2. **GCP service account credentials** with BigQuery read access (`roles/bigquery.dataViewer`
    or equivalent) and BigQuery Jobs list access (`roles/bigquery.user`) for query log collection.
-3. **Monte Carlo Ingestion API key** — create one in Monte Carlo Settings > API under the
-   `Ingestion` scope. You will need:
+3. **Monte Carlo Ingestion API key** — if you don't have one yet, create it in Monte Carlo
+   under **Settings > API** and select the **Ingestion** scope. See
+   [Creating an API Token](https://docs.getmontecarlo.com/docs/creating-an-api-token) for
+   step-by-step instructions. You will need:
    - `MCD_INGEST_ID` — the key ID
    - `MCD_INGEST_TOKEN` — the key token
 4. **Monte Carlo warehouse UUID** (`MCD_RESOURCE_UUID`) — the UUID of your BigQuery warehouse
