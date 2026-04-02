@@ -6,10 +6,6 @@ to Monte Carlo using the pycarlo SDK's IngestionService.
 Usage:
     MCD_INGEST_ID=<key-id> MCD_INGEST_TOKEN=<key-token> MCD_RESOURCE_UUID=<uuid> \
         python3 push_metadata.py --input-file metadata_output.json
-
-    # For dev environment:
-    MCD_INGEST_ID=<key-id> MCD_INGEST_TOKEN=<key-token> MCD_RESOURCE_UUID=<uuid> \
-        python3 push_metadata.py --dev --input-file metadata_output.json
 """
 
 from __future__ import annotations
@@ -37,8 +33,7 @@ log = logging.getLogger(__name__)
 RESOURCE_TYPE = "bigquery"
 _BATCH_SIZE = 500
 
-_PROD_ENDPOINT = "https://integrations.getmontecarlo.com"
-_DEV_ENDPOINT = "https://integrations.dev.getmontecarlo.com"
+_ENDPOINT = "https://integrations.getmontecarlo.com"
 
 
 def _asset_from_dict(d: dict) -> RelationalAsset:
@@ -84,13 +79,12 @@ def push(
     resource_uuid: str,
     key_id: str,
     key_token: str,
-    dev: bool = False,
     batch_size: int = _BATCH_SIZE,
     output_file: str = "metadata_push_result.json",
 ) -> dict:
     """Read a metadata manifest and push assets to Monte Carlo in batches."""
-    endpoint = _DEV_ENDPOINT if dev else _PROD_ENDPOINT
-    log.info("Using %s endpoint: %s", "dev" if dev else "prod", endpoint)
+    endpoint = _ENDPOINT
+    log.info("Using endpoint: %s", endpoint)
     with open(input_file) as fh:
         manifest = json.load(fh)
 
@@ -157,11 +151,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Push BigQuery Iceberg metadata from a manifest to Monte Carlo",
     )
-    parser.add_argument(
-        "--dev",
-        action="store_true",
-        help="Use the dev environment (integrations.dev.getmontecarlo.com). Default is prod.",
-    )
     parser.add_argument("--resource-uuid", default=os.getenv("MCD_RESOURCE_UUID"))
     parser.add_argument("--key-id", default=os.getenv("MCD_INGEST_ID"))
     parser.add_argument("--key-token", default=os.getenv("MCD_INGEST_TOKEN"))
@@ -185,7 +174,6 @@ def main() -> None:
         resource_uuid=args.resource_uuid,
         key_id=args.key_id,
         key_token=args.key_token,
-        dev=args.dev,
         batch_size=args.batch_size,
         output_file=args.output_file,
     )

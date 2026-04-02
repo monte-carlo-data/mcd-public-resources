@@ -8,12 +8,6 @@ Usage:
     MCD_INGEST_ID=<key-id> MCD_INGEST_TOKEN=<key-token> MCD_RESOURCE_UUID=<uuid> \
         python3 collect_and_push_query_logs.py \
         --project-id my-gcp-project
-
-    # For dev environment:
-    GOOGLE_APPLICATION_CREDENTIALS=./bq-credentials \
-    MCD_INGEST_ID=<key-id> MCD_INGEST_TOKEN=<key-token> MCD_RESOURCE_UUID=<uuid> \
-        python3 collect_and_push_query_logs.py --dev \
-        --project-id my-gcp-project
 """
 
 from __future__ import annotations
@@ -36,11 +30,6 @@ def main() -> None:
     parser.add_argument("--manifest-file", default="query_logs_output.json")
 
     # Push args
-    parser.add_argument(
-        "--dev",
-        action="store_true",
-        help="Use the dev environment (integrations.dev.getmontecarlo.com). Default is prod.",
-    )
     parser.add_argument("--resource-uuid", default=os.getenv("MCD_RESOURCE_UUID"))
     parser.add_argument("--key-id", default=os.getenv("MCD_INGEST_ID"))
     parser.add_argument("--key-token", default=os.getenv("MCD_INGEST_TOKEN"))
@@ -68,7 +57,6 @@ def main() -> None:
         resource_uuid=args.resource_uuid,
         key_id=args.key_id,
         key_token=args.key_token,
-        dev=args.dev,
         batch_size=args.batch_size,
         output_file=args.push_result_file,
     )
