@@ -14,6 +14,10 @@ These scripts query `INFORMATION_SCHEMA.TABLE_STORAGE` (filtering on
 metadata for Iceberg tables, then push it to Monte Carlo via the
 [pycarlo](https://pypi.org/project/pycarlo/) SDK.
 
+These scripts were created using the skills from the
+[push-ingestion plugin](https://github.com/monte-carlo-data/mcd-agent-toolkit/tree/main/skills/push-ingestion)
+in the [mcd-agent-toolkit](https://github.com/monte-carlo-data/mcd-agent-toolkit).
+
 ## Prerequisites
 
 1. **Python 3.9+**
