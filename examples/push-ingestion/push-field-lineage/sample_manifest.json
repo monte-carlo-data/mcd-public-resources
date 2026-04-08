@@ -1,0 +1,60 @@
+{
+  "resource_uuid": "fc0ccb9c-94a2-4b67-8fca-b2cb4583451a",
+  "resource_type": "snowflake",
+  "lineage_edges": [
+    {
+      "destination": {
+        "database": "analytics",
+        "schema": "public",
+        "name": "order_summary",
+        "type": "TABLE"
+      },
+      "sources": [
+        {
+          "database": "analytics",
+          "schema": "public",
+          "name": "orders",
+          "type": "TABLE"
+        },
+        {
+          "database": "analytics",
+          "schema": "public",
+          "name": "customers",
+          "type": "TABLE"
+        }
+      ],
+      "field_mappings": [
+        {
+          "destination_field": "order_id",
+          "source_fields": [
+            { "table": "orders", "field": "order_id" }
+          ]
+        },
+        {
+          "destination_field": "amount",
+          "source_fields": [
+            { "table": "orders", "field": "amount" }
+          ]
+        },
+        {
+          "destination_field": "order_date",
+          "source_fields": [
+            { "table": "orders", "field": "created_at" }
+          ]
+        },
+        {
+          "destination_field": "customer_name",
+          "source_fields": [
+            { "table": "customers", "field": "name" }
+          ]
+        },
+        {
+          "destination_field": "region",
+          "source_fields": [
+            { "table": "customers", "field": "region" }
+          ]
+        }
+      ]
+    }
+  ]
+}
