@@ -6,8 +6,9 @@ to Monte Carlo using the [Push Ingestion API](https://docs.getmontecarlo.com/doc
 ## Why Push Ingestion for Iceberg Tables?
 
 Monte Carlo's standard BigQuery collector uses `__TABLES__` to discover tables and
-collect metadata. BigQuery Iceberg tables (BigLake-managed) do **not** appear in
-`__TABLES__`, so they are invisible to Monte Carlo's pull-based collection.
+collect metadata. BigQuery Iceberg tables (BigLake-managed) appear in `__TABLES__`
+but lack freshness information there, so Monte Carlo's pull-based collection cannot
+monitor them for freshness or staleness.
 
 These scripts query `INFORMATION_SCHEMA.TABLE_STORAGE` (filtering on
 `managed_table_type = 'BIGLAKE'`) and `INFORMATION_SCHEMA.COLUMNS` to collect
