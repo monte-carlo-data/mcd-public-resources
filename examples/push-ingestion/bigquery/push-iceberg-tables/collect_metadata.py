@@ -133,24 +133,6 @@ def _fetch_columns(
     ]
 
 
-def _resolve_freshness(row: dict, freshness_column: str) -> str:
-    """Return the best available freshness timestamp as ISO8601.
-
-    Uses the configured freshness column if Google has populated it.
-    Falls back to current time with a warning.
-    """
-    if row.get(freshness_column):
-        return row[freshness_column].isoformat()
-
-    log.warning(
-        "%s is NULL for %s.%s — falling back to current time.",
-        freshness_column,
-        row["table_schema"],
-        row["table_name"],
-    )
-    return datetime.now(timezone.utc).isoformat()
-
-
 def collect(
     project_id: str,
     datasets: list[str] | None = None,
@@ -194,7 +176,9 @@ def collect(
                 "byte_count": row["current_physical_bytes"],
             },
             "freshness": {
-                "last_updated_time": _resolve_freshness(row, freshness_column),
+                "last_updated_time": row[freshness_column].isoformat()
+                if row.get(freshness_column)
+                else None,
             },
         }
 
