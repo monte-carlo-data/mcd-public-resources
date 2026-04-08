@@ -34,6 +34,15 @@ log = logging.getLogger(__name__)
 
 RESOURCE_TYPE = "bigquery"
 
+# Default BigQuery region for INFORMATION_SCHEMA queries.
+DEFAULT_REGION = os.getenv("BIGQUERY_REGION", "us")
+
+# Column in TABLE_STORAGE that holds the last-modified timestamp for Iceberg
+# tables.  Google is rolling out ``storage_last_modified_time`` — if your
+# project uses a different column name, override via --freshness-column or
+# the FRESHNESS_COLUMN env var.
+DEFAULT_FRESHNESS_COLUMN = os.getenv("FRESHNESS_COLUMN", "storage_last_modified_time")
+
 # BigQuery type → Monte Carlo canonical type
 BQ_TYPE_MAP: dict[str, str] = {
     "INT64": "INTEGER",
@@ -66,6 +75,8 @@ def map_bq_type(bq_type: str) -> str:
 def _fetch_iceberg_tables(
     client: bigquery.Client,
     project_id: str,
+    region: str = DEFAULT_REGION,
+    freshness_column: str = DEFAULT_FRESHNESS_COLUMN,
     datasets: list[str] | None = None,
     tables: list[str] | None = None,
 ) -> list[dict]:
@@ -88,13 +99,13 @@ def _fetch_iceberg_tables(
             table_name,
             total_rows,
             current_physical_bytes,
-            storage_last_modified_time,
+            {freshness_column},
             creation_time
-        FROM `{project_id}.region-us`.INFORMATION_SCHEMA.TABLE_STORAGE
+        FROM `{project_id}.region-{region}`.INFORMATION_SCHEMA.TABLE_STORAGE
         WHERE {where}
         ORDER BY table_schema, table_name
     """
-    log.info("Querying TABLE_STORAGE for Iceberg tables ...")
+    log.info("Querying TABLE_STORAGE for Iceberg tables (region=%s) ...", region)
     rows = list(client.query(query).result())
     log.info("Found %d Iceberg table(s).", len(rows))
     return [dict(row) for row in rows]
@@ -122,19 +133,18 @@ def _fetch_columns(
     ]
 
 
-def _resolve_freshness(row: dict) -> str:
+def _resolve_freshness(row: dict, freshness_column: str) -> str:
     """Return the best available freshness timestamp as ISO8601.
 
-    Uses storage_last_modified_time if Google has populated it (expected
-    early April 2026). Falls back to current time with a warning.
+    Uses the configured freshness column if Google has populated it.
+    Falls back to current time with a warning.
     """
-    if row.get("storage_last_modified_time"):
-        return row["storage_last_modified_time"].isoformat()
+    if row.get(freshness_column):
+        return row[freshness_column].isoformat()
 
     log.warning(
-        "storage_last_modified_time is NULL for %s.%s — "
-        "falling back to current time. Google's TABLE_STORAGE update "
-        "for Iceberg tables may not have shipped yet.",
+        "%s is NULL for %s.%s — falling back to current time.",
+        freshness_column,
         row["table_schema"],
         row["table_name"],
     )
@@ -146,6 +156,8 @@ def collect(
     datasets: list[str] | None = None,
     tables: list[str] | None = None,
     only_freshness_and_volume: bool = False,
+    region: str = DEFAULT_REGION,
+    freshness_column: str = DEFAULT_FRESHNESS_COLUMN,
     output_file: str = "metadata_output.json",
 ) -> dict:
     """Collect Iceberg table metadata and write a JSON manifest.
@@ -159,7 +171,10 @@ def collect(
     if only_freshness_and_volume:
         log.info("Running in freshness+volume only mode (skipping fields).")
 
-    iceberg_tables = _fetch_iceberg_tables(client, project_id, datasets, tables)
+    iceberg_tables = _fetch_iceberg_tables(
+        client, project_id, region=region, freshness_column=freshness_column,
+        datasets=datasets, tables=tables,
+    )
     if not iceberg_tables:
         log.warning("No Iceberg tables found matching the criteria.")
         return {"resource_type": RESOURCE_TYPE, "assets": []}
@@ -179,7 +194,7 @@ def collect(
                 "byte_count": row["current_physical_bytes"],
             },
             "freshness": {
-                "last_updated_time": _resolve_freshness(row),
+                "last_updated_time": _resolve_freshness(row, freshness_column),
             },
         }
 
@@ -233,6 +248,18 @@ def main() -> None:
         help="Skip field/schema collection — only collect freshness and volume. "
              "Use for periodic hourly pushes after the initial full metadata push.",
     )
+    parser.add_argument(
+        "--region",
+        default=DEFAULT_REGION,
+        help=f"BigQuery region for INFORMATION_SCHEMA queries (default: {DEFAULT_REGION}). "
+             "Also settable via BIGQUERY_REGION env var.",
+    )
+    parser.add_argument(
+        "--freshness-column",
+        default=DEFAULT_FRESHNESS_COLUMN,
+        help=f"Column in TABLE_STORAGE for the last-modified timestamp "
+             f"(default: {DEFAULT_FRESHNESS_COLUMN}). Also settable via FRESHNESS_COLUMN env var.",
+    )
     parser.add_argument("--output-file", default="metadata_output.json")
     args = parser.parse_args()
 
@@ -244,6 +271,8 @@ def main() -> None:
         datasets=args.datasets,
         tables=args.tables,
         only_freshness_and_volume=args.only_freshness_and_volume,
+        region=args.region,
+        freshness_column=args.freshness_column,
         output_file=args.output_file,
     )
 

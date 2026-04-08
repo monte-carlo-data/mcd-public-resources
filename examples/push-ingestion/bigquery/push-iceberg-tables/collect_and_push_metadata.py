@@ -16,8 +16,8 @@ from __future__ import annotations
 import argparse
 import os
 
-from collect_metadata import collect
-from push_metadata import push
+from collect_metadata import DEFAULT_FRESHNESS_COLUMN, DEFAULT_REGION, collect
+from push_metadata import _MAX_WORKERS, push
 
 
 def main() -> None:
@@ -33,6 +33,10 @@ def main() -> None:
         action="store_true",
         help="Skip field/schema collection — only collect freshness and volume.",
     )
+    parser.add_argument("--region", default=DEFAULT_REGION,
+                        help="BigQuery region for INFORMATION_SCHEMA queries.")
+    parser.add_argument("--freshness-column", default=DEFAULT_FRESHNESS_COLUMN,
+                        help="TABLE_STORAGE column for last-modified timestamp.")
     parser.add_argument("--manifest-file", default="metadata_output.json")
 
     # Push args
@@ -40,6 +44,8 @@ def main() -> None:
     parser.add_argument("--key-id", default=os.getenv("MCD_INGEST_ID"))
     parser.add_argument("--key-token", default=os.getenv("MCD_INGEST_TOKEN"))
     parser.add_argument("--batch-size", type=int, default=500)
+    parser.add_argument("--max-workers", type=int, default=_MAX_WORKERS,
+                        help="Max parallel push threads. Use 1 for easier debugging.")
     parser.add_argument("--push-result-file", default="metadata_push_result.json")
 
     args = parser.parse_args()
@@ -56,6 +62,8 @@ def main() -> None:
         datasets=args.datasets,
         tables=args.tables,
         only_freshness_and_volume=args.only_freshness_and_volume,
+        region=args.region,
+        freshness_column=args.freshness_column,
         output_file=args.manifest_file,
     )
 
@@ -65,6 +73,7 @@ def main() -> None:
         key_id=args.key_id,
         key_token=args.key_token,
         batch_size=args.batch_size,
+        max_workers=args.max_workers,
         output_file=args.push_result_file,
     )
 

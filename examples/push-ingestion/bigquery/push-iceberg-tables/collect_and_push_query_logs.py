@@ -16,7 +16,7 @@ import argparse
 import os
 
 from collect_query_logs import LOOKBACK_HOURS, LOOKBACK_LAG_HOURS, collect
-from push_query_logs import push
+from push_query_logs import _MAX_WORKERS, push
 
 
 def main() -> None:
@@ -34,6 +34,8 @@ def main() -> None:
     parser.add_argument("--key-id", default=os.getenv("MCD_INGEST_ID"))
     parser.add_argument("--key-token", default=os.getenv("MCD_INGEST_TOKEN"))
     parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--max-workers", type=int, default=_MAX_WORKERS,
+                        help="Max parallel push threads. Use 1 for easier debugging.")
     parser.add_argument("--push-result-file", default="query_logs_push_result.json")
 
     args = parser.parse_args()
@@ -58,6 +60,7 @@ def main() -> None:
         key_id=args.key_id,
         key_token=args.key_token,
         batch_size=args.batch_size,
+        max_workers=args.max_workers,
         output_file=args.push_result_file,
     )
 

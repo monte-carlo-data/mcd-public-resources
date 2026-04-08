@@ -122,6 +122,8 @@ python3 push_query_logs.py --input-file query_logs_output.json
 | `--datasets` | all datasets | Limit to specific dataset(s) |
 | `--tables` | all tables | Limit to specific table name(s) within datasets |
 | `--only-freshness-and-volume` | off | Skip schema/fields — only collect freshness and volume |
+| `--region` | `us` | BigQuery region for `INFORMATION_SCHEMA` queries (also `$BIGQUERY_REGION`) |
+| `--freshness-column` | `storage_last_modified_time` | `TABLE_STORAGE` column for the last-modified timestamp (also `$FRESHNESS_COLUMN`) |
 | `--output-file` | `metadata_output.json` | Path for the output manifest |
 
 ### Query Log Collection
@@ -141,6 +143,7 @@ python3 push_query_logs.py --input-file query_logs_output.json
 | `--key-id` | `$MCD_INGEST_ID` | Ingestion API key ID |
 | `--key-token` | `$MCD_INGEST_TOKEN` | Ingestion API key token |
 | `--batch-size` | `500` (metadata) / `100` (query logs) | Max items per API call |
+| `--max-workers` | `4` | Max parallel push threads (use `1` for easier debugging) |
 
 ## Recommended Automation
 

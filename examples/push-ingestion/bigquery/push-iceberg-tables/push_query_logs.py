@@ -31,6 +31,7 @@ LOG_TYPE = "bigquery"
 # Query logs include full SQL text — keep batches small to stay under the
 # 1 MB compressed payload limit.
 _BATCH_SIZE = 100
+_MAX_WORKERS = 4
 
 # Truncate very long SQL to prevent 413 errors.
 _MAX_QUERY_TEXT_LEN = 10_000
@@ -79,6 +80,7 @@ def push(
     key_id: str,
     key_token: str,
     batch_size: int = _BATCH_SIZE,
+    max_workers: int = _MAX_WORKERS,
     output_file: str = "query_logs_push_result.json",
 ) -> dict:
     """Read a query log manifest and push entries to Monte Carlo in batches."""
@@ -128,7 +130,7 @@ def push(
         )
         return invocation_id
 
-    max_workers = min(4, total_batches)
+    max_workers = min(max_workers, total_batches)
     invocation_ids: list[str | None] = [None] * total_batches
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -177,6 +179,12 @@ def main() -> None:
         default=_BATCH_SIZE,
         help=f"Max entries per push batch (default: {_BATCH_SIZE})",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=_MAX_WORKERS,
+        help=f"Max parallel push threads (default: {_MAX_WORKERS}). Use 1 for easier debugging.",
+    )
     args = parser.parse_args()
 
     required = ["resource_uuid", "key_id", "key_token"]
@@ -190,6 +198,7 @@ def main() -> None:
         key_id=args.key_id,
         key_token=args.key_token,
         batch_size=args.batch_size,
+        max_workers=args.max_workers,
         output_file=args.output_file,
     )
 
