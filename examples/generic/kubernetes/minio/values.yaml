@@ -1,0 +1,16 @@
+namespace: mcd-agent
+replicaCount: 1
+
+image:
+  pullPolicy: Always
+  tag: "latest-generic"
+
+container:
+  backendServiceUrl: "<YOUR_BACKEND_SERVICE_URL>"
+  storageBucketName: "mcd-agent-storage"
+  storageType: "S3_COMPATIBLE"
+  storageEndpointUrl: "http://minio-api.minio.svc.cluster.local:9000"
+  storageAccessKey: "minioadmin"
+  storageSecretKey: "minioadmin"
+
+skipExternalSecrets: true
