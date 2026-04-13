@@ -13,7 +13,7 @@ Deploy the Monte Carlo Generic Agent with [Docker Compose](https://docs.docker.c
 
 Edit `docker-compose.yml` and replace:
 
-- `<YOUR_BACKEND_SERVICE_URL>` — in the Monte Carlo app, go to **Settings > Account Information > Agent Service** and copy the **Public endpoint**.
+- `<YOUR_BACKEND_SERVICE_URL>` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
 - `change-me-to-a-secure-password` — a secure password for MinIO (appears in 3 places: `mcd-agent`, `create-bucket`, and `minio` services).
 
 ### 2. Create the token file
