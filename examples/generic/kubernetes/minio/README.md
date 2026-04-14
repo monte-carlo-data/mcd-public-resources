@@ -65,7 +65,7 @@ Deploy the agent:
 ```bash
 helm upgrade --install mcd-agent \
   oci://registry-1.docker.io/montecarlodata/generic-agent-helm \
-  --version 0.1.0 \
+  --version 0.0.5 \
   -f values.yaml
 ```
 
