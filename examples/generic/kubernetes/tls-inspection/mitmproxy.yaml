@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mitmproxy-addons
+  namespace: mcd-agent
+data:
+  stream_sse.py: |
+    """mitmproxy addon: stream only SSE responses to avoid buffering long-lived connections."""
+
+    def responseheaders(flow):
+        content_type = flow.response.headers.get("content-type", "")
+        if "text/event-stream" in content_type:
+            flow.response.stream = True
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitmproxy
+  namespace: mcd-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mitmproxy
+  template:
+    metadata:
+      labels:
+        app: mitmproxy
+    spec:
+      initContainers:
+        - name: copy-ca
+          image: alpine:3.21
+          command:
+            - sh
+            - -c
+            - cp /ca-secret/mitmproxy-ca.pem /mitmproxy-confdir/mitmproxy-ca.pem
+          volumeMounts:
+            - name: mitmproxy-ca-secret
+              mountPath: /ca-secret
+              readOnly: true
+            - name: mitmproxy-confdir
+              mountPath: /mitmproxy-confdir
+      containers:
+        - name: mitmproxy
+          image: mitmproxy/mitmproxy
+          command:
+            - mitmweb
+            - --web-host
+            - "0.0.0.0"
+            - --listen-port
+            - "3128"
+            - --no-web-open-browser
+            - --set
+            - web_password=mitmproxy
+            - -s
+            - /addons/stream_sse.py
+          ports:
+            - containerPort: 3128
+              name: proxy
+            - containerPort: 8081
+              name: web-ui
+          volumeMounts:
+            - name: mitmproxy-confdir
+              mountPath: /root/.mitmproxy
+            - name: mitmproxy-addons
+              mountPath: /addons
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 3128
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: mitmproxy-ca-secret
+          secret:
+            secretName: mitmproxy-ca
+        - name: mitmproxy-confdir
+          emptyDir: {}
+        - name: mitmproxy-addons
+          configMap:
+            name: mitmproxy-addons
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mitmproxy
+  namespace: mcd-agent
+spec:
+  selector:
+    app: mitmproxy
+  ports:
+    - port: 3128
+      targetPort: 3128
+      name: proxy
+    - port: 8081
+      targetPort: 8081
+      name: web-ui

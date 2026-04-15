@@ -12,6 +12,13 @@ container:
   storageEndpointUrl: "http://minio-api.minio.svc.cluster.local:9000"
   storageAccessKey: "minioadmin"
   storageSecretKey: "minioadmin"
+  extraEnv:
+    - name: HTTPS_PROXY
+      value: "http://squid.mcd-agent.svc.cluster.local:3128"
+    - name: HTTP_PROXY
+      value: "http://squid.mcd-agent.svc.cluster.local:3128"
+    - name: NO_PROXY
+      value: "minio-api.minio.svc.cluster.local,localhost,127.0.0.1"
 
 skipExternalSecrets: true
 
