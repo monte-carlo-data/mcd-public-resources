@@ -15,13 +15,26 @@ services:
       - MCD_OPS_RUNNER_THREAD_COUNT=18
       - MCD_PUBLISHER_THREAD_COUNT=3
       - MCD_TOKEN_FILE_PATH=/etc/secrets/mcd-agent-token/contents.json
+      - HTTPS_PROXY=http://squid:3128
+      - HTTP_PROXY=http://squid:3128
+      - NO_PROXY=minio,localhost,127.0.0.1
     volumes:
       - ./secrets/token.json:/etc/secrets/mcd-agent-token/contents.json:ro
       - ./secrets/integrations:/etc/secrets/integrations:ro
     restart: unless-stopped
     depends_on:
+      squid:
+        condition: service_started
       create-bucket:
         condition: service_completed_successfully
+
+  squid:
+    image: ubuntu/squid:latest
+    ports:
+      - "3128:3128"
+    volumes:
+      - ./squid.conf:/etc/squid/squid.conf:ro
+    restart: unless-stopped
 
   create-bucket:
     image: quay.io/minio/mc:latest
