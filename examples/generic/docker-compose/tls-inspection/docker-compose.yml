@@ -12,16 +12,40 @@ services:
       - MCD_STORAGE_ENDPOINT_URL=http://minio:9000
       - MCD_STORAGE_ACCESS_KEY=minioadmin
       - MCD_STORAGE_SECRET_KEY=change-me-to-a-secure-password
+      - MCD_TOKEN_FILE_PATH=/etc/secrets/mcd-agent-token/contents.json
       - MCD_OPS_RUNNER_THREAD_COUNT=18
       - MCD_PUBLISHER_THREAD_COUNT=3
-      - MCD_TOKEN_FILE_PATH=/etc/secrets/mcd-agent-token/contents.json
+      - HTTPS_PROXY=http://mitmproxy:3128
+      - HTTP_PROXY=http://mitmproxy:3128
+      - NO_PROXY=minio,localhost,127.0.0.1
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
     volumes:
+      - ./certs/mitmproxy-ca-cert.pem:/usr/local/share/ca-certificates/mitmproxy-ca.crt:ro
       - ./secrets/token.json:/etc/secrets/mcd-agent-token/contents.json:ro
       - ./secrets/integrations:/etc/secrets/integrations:ro
+    command: >-
+      /bin/sh -c "
+      update-ca-certificates 2>/dev/null;
+      . .venv/bin/activate &&
+      exec gunicorn --bind :$$PORT --workers $$GUNICORN_WORKERS --threads $$GUNICORN_THREADS --timeout $$GUNICORN_TIMEOUT hermes.agent.main:app
+      "
     restart: unless-stopped
     depends_on:
+      mitmproxy:
+        condition: service_started
       create-bucket:
         condition: service_completed_successfully
+
+  mitmproxy:
+    image: mitmproxy/mitmproxy
+    command: mitmweb --web-host 0.0.0.0 --listen-port 3128 --no-web-open-browser --set web_password=mitmproxy -s /home/mitmproxy/stream_sse.py
+    ports:
+      - "3128:3128"
+      - "8081:8081"
+    volumes:
+      - ./certs:/home/mitmproxy/.mitmproxy
+      - ./stream_sse.py:/home/mitmproxy/stream_sse.py:ro
+    restart: unless-stopped
 
   create-bucket:
     image: quay.io/minio/mc:latest
