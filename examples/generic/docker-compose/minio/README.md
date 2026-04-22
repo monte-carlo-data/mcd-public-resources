@@ -11,10 +11,18 @@ Deploy the Monte Carlo Generic Agent with [Docker Compose](https://docs.docker.c
 
 ### 1. Configure
 
-Edit `docker-compose.yml` and replace:
+Copy the example environment file and fill in your values:
 
-- `<YOUR_BACKEND_SERVICE_URL>` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
-- `change-me-to-a-secure-password` — a secure password for MinIO (appears in 3 places: `mcd-agent`, `create-bucket`, and `minio` services).
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set:
+
+- `BACKEND_SERVICE_URL` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
+- `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` — credentials for MinIO.
+
+Docker Compose automatically reads `.env` when you start the stack.
 
 ### 2. Create the token file
 
@@ -52,7 +60,7 @@ curl -s -X POST http://localhost:8080/api/v1/test/reachability
 
 A successful response contains `"ok": true`.
 
-You can also browse the MinIO Console at http://localhost:9001 (log in with `minioadmin` and your configured password) to inspect the storage bucket.
+You can also browse the MinIO Console at http://localhost:9001 (log in with your configured `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`) to inspect the storage bucket.
 
 > **Note:** MinIO with default credentials is suitable for development and testing only. For production deployments, configure MinIO with proper credentials and TLS, or use a cloud-native storage service.
 

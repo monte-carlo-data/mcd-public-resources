@@ -5,13 +5,13 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
-      - BACKEND_SERVICE_URL=<YOUR_BACKEND_SERVICE_URL>
+      - BACKEND_SERVICE_URL=${BACKEND_SERVICE_URL}
       - MCD_AGENT_WRAPPER_TYPE=DOCKER
       - MCD_STORAGE_BUCKET_NAME=mcd-agent-storage
       - MCD_STORAGE=S3_COMPATIBLE
       - MCD_STORAGE_ENDPOINT_URL=http://minio:9000
-      - MCD_STORAGE_ACCESS_KEY=minioadmin
-      - MCD_STORAGE_SECRET_KEY=change-me-to-a-secure-password
+      - MCD_STORAGE_ACCESS_KEY=${MINIO_ROOT_USER}
+      - MCD_STORAGE_SECRET_KEY=${MINIO_ROOT_PASSWORD}
       - MCD_TOKEN_FILE_PATH=/etc/secrets/mcd-agent-token/contents.json
       - MCD_OPS_RUNNER_THREAD_COUNT=18
       - MCD_PUBLISHER_THREAD_COUNT=3
@@ -38,7 +38,7 @@ services:
 
   mitmproxy:
     image: mitmproxy/mitmproxy
-    command: mitmweb --web-host 0.0.0.0 --listen-port 3128 --no-web-open-browser --set web_password=mitmproxy -s /home/mitmproxy/stream_sse.py
+    command: mitmweb --web-host 0.0.0.0 --listen-port 3128 --no-web-open-browser --set web_password=${MITMPROXY_WEB_PASSWORD} -s /home/mitmproxy/stream_sse.py
     ports:
       - "3128:3128"
       - "8081:8081"
@@ -53,7 +53,7 @@ services:
       minio:
         condition: service_healthy
     environment:
-      - MC_HOST_local=http://minioadmin:change-me-to-a-secure-password@minio:9000
+      - MC_HOST_local=http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000
     entrypoint: ["mc", "mb", "local/mcd-agent-storage", "--ignore-existing"]
 
   minio:
@@ -63,8 +63,8 @@ services:
       - "9000:9000"
       - "9001:9001"
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=change-me-to-a-secure-password
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
     volumes:
       - minio-data:/data
     healthcheck:
