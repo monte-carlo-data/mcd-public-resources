@@ -20,10 +20,21 @@ This creates a CA certificate that mitmproxy uses to intercept TLS connections. 
 
 ### 2. Configure
 
-Edit `docker-compose.yml` and replace:
+Copy the example environment file and fill in your values:
 
-- `<YOUR_BACKEND_SERVICE_URL>` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
-- `change-me-to-a-secure-password` — a secure password for MinIO (appears in 3 places: `mcd-agent`, `create-bucket`, and `minio` services).
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set:
+
+- `BACKEND_SERVICE_URL` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
+- `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` — credentials for MinIO.
+- `MITMPROXY_WEB_PASSWORD` — password for the mitmproxy web UI.
+
+Optionally set `AGENT_IMAGE_TAG` to pin the agent image to a specific version (e.g. `0.0.8-generic`). If unset, defaults to `latest-generic`.
+
+Docker Compose automatically reads `.env` when you start the stack.
 
 ### 3. Create the token file
 
@@ -47,7 +58,7 @@ This starts MinIO, creates the storage bucket, launches mitmproxy, and starts th
 
 ### 5. Open the mitmproxy web UI
 
-Open http://localhost:8081 in your browser and log in with password `mitmproxy` (configurable via `web_password` in `docker-compose.yml`). All HTTPS requests from the agent appear in real time. Click any request to inspect:
+Open http://localhost:8081 in your browser and log in with the `MITMPROXY_WEB_PASSWORD` you set in `.env`. All HTTPS requests from the agent appear in real time. Click any request to inspect:
 
 - Full URL and HTTP method
 - Request and response headers
