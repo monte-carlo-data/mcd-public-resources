@@ -32,6 +32,8 @@ Edit `.env` and set:
 - `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` — credentials for MinIO.
 - `MITMPROXY_WEB_PASSWORD` — password for the mitmproxy web UI.
 
+Optionally set `AGENT_IMAGE_TAG` to pin the agent image to a specific version (e.g. `0.0.8-generic`). If unset, defaults to `latest-generic`.
+
 Docker Compose automatically reads `.env` when you start the stack.
 
 ### 3. Create the token file

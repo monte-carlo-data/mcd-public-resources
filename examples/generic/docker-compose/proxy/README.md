@@ -22,6 +22,8 @@ Edit `.env` and set:
 - `BACKEND_SERVICE_URL` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
 - `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` — credentials for MinIO.
 
+Optionally set `AGENT_IMAGE_TAG` to pin the agent image to a specific version (e.g. `0.0.8-generic`). If unset, defaults to `latest-generic`.
+
 Docker Compose automatically reads `.env` when you start the stack.
 
 ### 2. Create the token file
