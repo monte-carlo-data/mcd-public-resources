@@ -225,7 +225,8 @@ LOG_FORMAT=json python3 push_lineage.py 2>> /var/log/data360-lineage.jsonl
 | `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOG_FORMAT` | plain | Set to `json` for structured log output |
 | `INGEST_BATCH_SIZE` | `500` | Edges per Monte Carlo push batch |
-| `METADATA_MAX_POLLS` | `120` | Max SOAP polling attempts before timeout |
+| `METADATA_BATCH_SIZE` | `10` | ObjectSourceTargetMap records per retrieve batch (smaller = faster per-batch, more API calls) |
+| `METADATA_MAX_POLLS` | `120` | Max SOAP polling attempts per retrieve batch |
 | `METADATA_POLL_INTERVAL` | `5` | Seconds between SOAP polls |
 | `SF_DEFAULT_DATA_SPACE` | `default` | Fallback data space when XML has no `<dataSpace>` and the org has multiple data spaces |
 

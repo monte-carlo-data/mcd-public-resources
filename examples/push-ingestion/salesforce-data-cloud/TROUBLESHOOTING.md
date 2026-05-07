@@ -83,25 +83,28 @@ UI: **Settings → Integrations → your Data Cloud connection**.
 
 ### Script appears to hang after "Step 3: Retrieving ObjectSourceTargetMap metadata"
 
-This is normal. The Salesforce SOAP Metadata API is asynchronous — the script submits
-a retrieve job and polls for completion. With the default settings (120 polls × 5 seconds)
-this can take up to 10 minutes. You will see a progress message every 5 polls:
+This is normal. The script first calls `listMetadata` to enumerate all records (~0.5s),
+then retrieves them in batches of 10 (configurable via `METADATA_BATCH_SIZE`). Each batch
+is an asynchronous SOAP job that typically completes in 5–10 seconds. Progress is logged
+after every batch with a rolling ETA:
 
 ```
-[10:42:08] [INFO] Waiting for Salesforce metadata retrieve... poll 1/120
-[10:42:33] [INFO] Waiting for Salesforce metadata retrieve... poll 6/120
+[10:42:04] [INFO] Found 27 ObjectSourceTargetMap record(s) — retrieving in 3 batch(es) of up to 10
+[10:42:11] [INFO] Batch 1/3 complete (10 record(s), 6.5s) — est. 13s remaining
+[10:42:17] [INFO] Batch 2/3 complete (10 record(s), 6.5s) — est. 6s remaining
+[10:42:23] [INFO] Batch 3/3 complete (7 record(s), 6.4s)
 ```
 
-If you see no progress messages at all, something may have gone wrong silently — run
-with `LOG_LEVEL=DEBUG` to see every poll response.
+If you see no progress messages at all, run with `LOG_LEVEL=DEBUG` to see each poll attempt.
 
-### `Metadata retrieve did not complete within Xs`
+### `Batch retrieve did not complete within Xs`
 
-The Salesforce job timed out. The default timeout is 120 polls × 5 seconds = 10 minutes.
-Large orgs with many DLO→DMO mappings may need longer. Options:
-1. Double `METADATA_MAX_POLLS` in `.env` and retry (e.g. `METADATA_MAX_POLLS=240` gives 20 minutes)
-2. Try again — Salesforce metadata retrieval can be slow under org load
-3. Check Salesforce org status at status.salesforce.com
+A single batch timed out. The default per-batch timeout is 120 polls × 5 seconds = 10 minutes,
+which should be sufficient for any batch size. Options:
+1. Reduce `METADATA_BATCH_SIZE` (e.g. `METADATA_BATCH_SIZE=5`) so each batch is smaller
+2. Increase `METADATA_MAX_POLLS` if the org is under heavy load
+3. Try again — Salesforce metadata retrieval can be slow under org load
+4. Check Salesforce org status at status.salesforce.com
 
 ### `Salesforce retrieve job failed [INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY]`
 

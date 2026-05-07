@@ -37,8 +37,9 @@ except ImportError as err:
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 SF_API_VERSION = "62.0"
-METADATA_MAX_POLLS = 120
-METADATA_POLL_INTERVAL = 5.0
+METADATA_BATCH_SIZE = int(os.environ.get("METADATA_BATCH_SIZE", "10"))
+METADATA_MAX_POLLS = int(os.environ.get("METADATA_MAX_POLLS", "120"))
+METADATA_POLL_INTERVAL = float(os.environ.get("METADATA_POLL_INTERVAL", "5.0"))
 
 SOAP_NS = {
     "soapenv": "http://schemas.xmlsoap.org/soap/envelope/",
@@ -46,7 +47,23 @@ SOAP_NS = {
 }
 OSTM_NS = {"sf": "http://soap.sforce.com/2006/04/metadata"}
 
-_RETRIEVE_ENVELOPE = """\
+_LIST_METADATA_ENVELOPE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope
+    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+    xmlns:met="http://soap.sforce.com/2006/04/metadata">
+  <soapenv:Header>
+    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
+  </soapenv:Header>
+  <soapenv:Body>
+    <met:listMetadata>
+      <met:queries><met:type>ObjectSourceTargetMap</met:type></met:queries>
+      <met:asOfVersion>{api_version}</met:asOfVersion>
+    </met:listMetadata>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+_RETRIEVE_BATCH_ENVELOPE = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope
     xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -60,7 +77,7 @@ _RETRIEVE_ENVELOPE = """\
         <met:apiVersion>{api_version}</met:apiVersion>
         <met:unpackaged>
           <met:types>
-            <met:members>*</met:members>
+            {members}
             <met:name>ObjectSourceTargetMap</met:name>
           </met:types>
         </met:unpackaged>
@@ -99,6 +116,68 @@ def _warn(msg): print(f"  [WARN] {msg}")
 def _fail(msg): print(f"  [FAIL] {msg}")
 
 
+def _format_eta(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins}m {secs:02d}s"
+
+
+def _soap_post(url: str, envelope: str, action: str) -> ET.Element:
+    resp = requests.post(
+        url,
+        data=envelope.encode("utf-8"),
+        headers={"Content-Type": "text/xml", "SOAPAction": action},
+        timeout=60,
+        verify=True,
+    )
+    resp.raise_for_status()
+    root = SafeET.fromstring(resp.text)
+    fault = root.find(".//soapenv:Fault", SOAP_NS)
+    if fault is not None:
+        code = fault.findtext("faultcode", default="unknown")
+        msg  = fault.findtext("faultstring", default="no detail")
+        _fail(f"SOAP fault [{code}]: {msg}")
+        sys.exit(1)
+    return root
+
+
+def _poll_batch(url: str, token: str, async_id: str, label: str) -> bytes:
+    for attempt in range(METADATA_MAX_POLLS):
+        status_body = _STATUS_ENVELOPE.format(
+            session_id=escape(token), async_id=escape(async_id)
+        )
+        status_root = _soap_post(url, status_body, action="checkRetrieveStatus")
+
+        done_el  = status_root.find(".//met:done",   SOAP_NS)
+        state_el = status_root.find(".//met:status", SOAP_NS)
+        state    = state_el.text if state_el is not None else "unknown"
+
+        if done_el is not None and done_el.text == "true":
+            if state == "Failed":
+                err_code = status_root.findtext(".//met:errorStatusCode", default="", namespaces=SOAP_NS)
+                err_msg  = status_root.findtext(".//met:errorMessage",    default="", namespaces=SOAP_NS)
+                _fail(f"Retrieve job failed [{err_code}]: {err_msg}")
+                sys.exit(1)
+            zip_el = status_root.find(".//met:zipFile", SOAP_NS)
+            if zip_el is None or not zip_el.text:
+                _fail("Retrieve completed but ZIP payload is empty")
+                sys.exit(1)
+            return base64.b64decode(zip_el.text)
+
+        if attempt % 5 == 0:
+            elapsed_msg = f"attempt {attempt + 1}/{METADATA_MAX_POLLS}, status={state}"
+            print(f"  [....] {label}: polling... {elapsed_msg}")
+        time.sleep(METADATA_POLL_INTERVAL)
+
+    _fail(
+        f"Retrieve did not complete within "
+        f"{METADATA_MAX_POLLS * METADATA_POLL_INTERVAL:.0f}s ({label}). "
+        f"Try increasing METADATA_MAX_POLLS (current: {METADATA_MAX_POLLS})."
+    )
+    sys.exit(1)
+
+
 def check_auth(instance_url, client_id, client_secret):
     _sep("1. OAuth — client credentials")
     t0 = time.monotonic()
@@ -106,6 +185,7 @@ def check_auth(instance_url, client_id, client_secret):
         f"{instance_url}/services/oauth2/token",
         data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
         timeout=30,
+        verify=True,
     )
     data = resp.json()
     if "error" in data:
@@ -125,6 +205,7 @@ def check_data_spaces(instance_url, token):
         headers={"Authorization": f"Bearer {token}"},
         params={"q": "SELECT DataSpaceApiName FROM Dataspace"},
         timeout=30,
+        verify=True,
     )
     elapsed = time.monotonic() - t0
     if resp.status_code != 200:
@@ -152,84 +233,81 @@ def check_data_spaces(instance_url, token):
 def check_metadata_retrieve(instance_url, token):
     _sep("3. SOAP Metadata API — ObjectSourceTargetMap retrieve")
 
-    # Submit retrieve job
+    url = f"{instance_url}/services/Soap/m/{SF_API_VERSION}"
     t0 = time.monotonic()
-    envelope = _RETRIEVE_ENVELOPE.format(
+
+    # Step 3a: list all record names via listMetadata (~0.5s)
+    list_envelope = _LIST_METADATA_ENVELOPE.format(
         session_id=escape(token), api_version=escape(SF_API_VERSION)
     )
-    url = f"{instance_url}/services/Soap/m/{SF_API_VERSION}"
-    resp = requests.post(
-        url,
-        data=envelope.encode("utf-8"),
-        headers={"Content-Type": "text/xml", "SOAPAction": "retrieve"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    root = SafeET.fromstring(resp.text)
+    list_root = _soap_post(url, list_envelope, action="listMetadata")
+    names = [
+        el.text
+        for el in list_root.findall(".//{http://soap.sforce.com/2006/04/metadata}fullName")
+        if el.text
+    ]
+    elapsed = time.monotonic() - t0
+    _ok(f"listMetadata returned {len(names)} record(s) in {elapsed:.1f}s")
 
-    fault = root.find(".//soapenv:Fault", SOAP_NS)
-    if fault is not None:
-        code = fault.findtext("faultcode", default="unknown")
-        msg  = fault.findtext("faultstring", default="no detail")
-        _fail(f"SOAP fault [{code}]: {msg}")
-        sys.exit(1)
+    if not names:
+        _warn("No ObjectSourceTargetMap records found in org")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w"):
+            pass
+        return buf.getvalue()
 
-    async_id_el = root.find(".//met:id", SOAP_NS)
-    if async_id_el is None:
-        _fail("No async job ID returned from retrieve request")
-        sys.exit(1)
+    # Step 3b: retrieve in batches
+    batches = [names[i:i + METADATA_BATCH_SIZE] for i in range(0, len(names), METADATA_BATCH_SIZE)]
+    total_batches = len(batches)
+    _ok(f"Retrieving {len(names)} record(s) in {total_batches} batch(es) of up to {METADATA_BATCH_SIZE}")
 
-    async_id = async_id_el.text
-    _ok(f"Retrieve job submitted (id={async_id})")
+    combined_buf = io.BytesIO()
+    combined_zip = zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED)
+    batch_times: list = []
 
-    # Poll for completion
-    zip_bytes = None
-    for attempt in range(METADATA_MAX_POLLS):
-        status_body = _STATUS_ENVELOPE.format(
-            session_id=escape(token), async_id=escape(async_id)
+    for i, batch in enumerate(batches):
+        batch_num = i + 1
+        batch_t0 = time.monotonic()
+        members_xml = "\n            ".join(
+            f"<met:members>{escape(n)}</met:members>" for n in batch
         )
-        status_resp = requests.post(
-            url,
-            data=status_body.encode("utf-8"),
-            headers={"Content-Type": "text/xml", "SOAPAction": "checkRetrieveStatus"},
-            timeout=60,
+        retrieve_envelope = _RETRIEVE_BATCH_ENVELOPE.format(
+            session_id=escape(token),
+            api_version=escape(SF_API_VERSION),
+            members=members_xml,
         )
-        status_resp.raise_for_status()
-        status_root = SafeET.fromstring(status_resp.text)
+        retrieve_root = _soap_post(url, retrieve_envelope, action="retrieve")
+        async_id_el = retrieve_root.find(".//met:id", SOAP_NS)
+        if async_id_el is None or not async_id_el.text:
+            _fail(f"Batch {batch_num}: no async job ID returned")
+            sys.exit(1)
+        async_id = async_id_el.text
 
-        done_el  = status_root.find(".//met:done",   SOAP_NS)
-        state_el = status_root.find(".//met:status", SOAP_NS)
-        state    = state_el.text if state_el is not None else "unknown"
+        zip_bytes = _poll_batch(url, token, async_id, label=f"Batch {batch_num}/{total_batches}")
+        batch_elapsed = time.monotonic() - batch_t0
+        batch_times.append(batch_elapsed)
 
-        if done_el is not None and done_el.text == "true":
-            if state == "Failed":
-                err_code = status_root.findtext(".//met:errorStatusCode", default="", namespaces=SOAP_NS)
-                err_msg  = status_root.findtext(".//met:errorMessage",    default="", namespaces=SOAP_NS)
-                _fail(f"Retrieve job failed [{err_code}]: {err_msg}")
-                sys.exit(1)
-            zip_el = status_root.find(".//met:zipFile", SOAP_NS)
-            if zip_el is None or not zip_el.text:
-                _fail("Retrieve completed but ZIP payload is empty")
-                sys.exit(1)
-            elapsed = time.monotonic() - t0
-            _ok(f"Retrieve completed after {attempt + 1} poll(s) ({elapsed:.1f}s)")
-            zip_bytes = base64.b64decode(zip_el.text)
-            break
+        window = batch_times[-5:]
+        avg = sum(window) / len(window)
+        remaining = total_batches - batch_num
+        if remaining > 0:
+            _ok(
+                f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), "
+                f"{batch_elapsed:.1f}s) — est. {_format_eta(avg * remaining)} remaining"
+            )
+        else:
+            _ok(f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), {batch_elapsed:.1f}s)")
 
-        if attempt % 5 == 0:
-            elapsed = time.monotonic() - t0
-            print(f"  [....] Polling... attempt {attempt + 1}/{METADATA_MAX_POLLS} "
-                  f"(status={state}, elapsed={elapsed:.0f}s)")
-        time.sleep(METADATA_POLL_INTERVAL)
-    else:
-        _fail(
-            f"Retrieve did not complete within "
-            f"{METADATA_MAX_POLLS * METADATA_POLL_INTERVAL:.0f}s. "
-            f"Consider increasing METADATA_MAX_POLLS in push_lineage.py."
-        )
-        sys.exit(1)
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
+            for name in batch_zf.namelist():
+                if name.endswith("package.xml"):
+                    continue
+                combined_zip.writestr(name, batch_zf.read(name))
 
-    return zip_bytes
+    combined_zip.close()
+    total_elapsed = time.monotonic() - t0
+    _ok(f"All {len(names)} record(s) retrieved in {total_elapsed:.1f}s")
+    return combined_buf.getvalue()
 
 
 def check_zip_contents(zip_bytes):

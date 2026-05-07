@@ -25,7 +25,8 @@ Optional env vars:
   LOG_LEVEL              — DEBUG/INFO/WARNING/ERROR (default: INFO)
   LOG_FORMAT             — json for structured output (default: plain)
   INGEST_BATCH_SIZE      — edges per push batch (default: 500)
-  METADATA_MAX_POLLS     — max SOAP polling attempts (default: 120)
+  METADATA_BATCH_SIZE    — ObjectSourceTargetMap records per retrieve batch (default: 10)
+  METADATA_MAX_POLLS     — max SOAP polling attempts per batch (default: 120)
   METADATA_POLL_INTERVAL — seconds between SOAP polls (default: 5)
   SF_DEFAULT_DATA_SPACE  — fallback data space name (default: default)
 """
@@ -107,6 +108,7 @@ def _parse_positive_float(name: str, default: float) -> float:
 
 
 INGEST_BATCH_SIZE      = _parse_positive_int("INGEST_BATCH_SIZE", 500)
+METADATA_BATCH_SIZE    = _parse_positive_int("METADATA_BATCH_SIZE", 10)
 METADATA_MAX_POLLS     = _parse_positive_int("METADATA_MAX_POLLS", 120)
 METADATA_POLL_INTERVAL = _parse_positive_float("METADATA_POLL_INTERVAL", 5.0)
 
@@ -120,7 +122,23 @@ SOAP_NS = {
 }
 
 # ── SOAP envelope templates ───────────────────────────────────────────────────
-_RETRIEVE_ENVELOPE = """\
+_LIST_METADATA_ENVELOPE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope
+    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+    xmlns:met="http://soap.sforce.com/2006/04/metadata">
+  <soapenv:Header>
+    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
+  </soapenv:Header>
+  <soapenv:Body>
+    <met:listMetadata>
+      <met:queries><met:type>ObjectSourceTargetMap</met:type></met:queries>
+      <met:asOfVersion>{api_version}</met:asOfVersion>
+    </met:listMetadata>
+  </soapenv:Body>
+</soapenv:Envelope>"""
+
+_RETRIEVE_BATCH_ENVELOPE = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope
     xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -134,7 +152,7 @@ _RETRIEVE_ENVELOPE = """\
         <met:apiVersion>{api_version}</met:apiVersion>
         <met:unpackaged>
           <met:types>
-            <met:members>*</met:members>
+            {members}
             <met:name>ObjectSourceTargetMap</met:name>
           </met:types>
         </met:unpackaged>
@@ -262,6 +280,13 @@ def _save_failed_edges(run_id: str, kind: str, edges: list) -> str:
     return str(path)
 
 
+def _format_eta(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    mins, secs = divmod(int(seconds), 60)
+    return f"{mins}m {secs:02d}s"
+
+
 # ── Salesforce service ────────────────────────────────────────────────────────
 class SalesforceDataCloudService:
     """Encapsulates Salesforce authentication and metadata retrieval."""
@@ -377,26 +402,38 @@ class SalesforceDataCloudService:
             raise RuntimeError(f"Salesforce SOAP fault [{code}]: {msg}")
         return root
 
-    def fetch_metadata(self) -> bytes:
-        t0 = time.monotonic()
-        log.info("Step 3: Retrieving ObjectSourceTargetMap metadata from Salesforce")
-
-        envelope = _RETRIEVE_ENVELOPE.format(
+    def _list_ostm_names(self) -> list:
+        """Call listMetadata to get all ObjectSourceTargetMap record names. Completes in <1s."""
+        envelope = _LIST_METADATA_ENVELOPE.format(
             session_id=escape(self._token),
             api_version=escape(SF_API_VERSION),
         )
-        root = self._soap_post(envelope, action="retrieve")
+        root = self._soap_post(envelope, action="listMetadata")
+        return [
+            el.text
+            for el in root.findall(".//{http://soap.sforce.com/2006/04/metadata}fullName")
+            if el.text
+        ]
 
+    def _submit_retrieve(self, members_xml: str) -> str:
+        """Submit a retrieve job for specific members and return the async job ID."""
+        envelope = _RETRIEVE_BATCH_ENVELOPE.format(
+            session_id=escape(self._token),
+            api_version=escape(SF_API_VERSION),
+            members=members_xml,
+        )
+        root = self._soap_post(envelope, action="retrieve")
         async_id_el = root.find(".//met:id", SOAP_NS)
         if async_id_el is None:
             fault_el = root.find(".//met:error", SOAP_NS)
             detail = ET.tostring(fault_el, encoding="unicode") if fault_el is not None else "no error element"
             raise RuntimeError(f"Retrieve returned no async ID. Detail: {detail}")
-        async_id = async_id_el.text
-        if not async_id:
+        if not async_id_el.text:
             raise RuntimeError("Salesforce returned an empty async job ID for the metadata retrieve.")
-        log.info("  Retrieve job started (id=%s)", async_id)
+        return async_id_el.text
 
+    def _poll_retrieve(self, async_id: str, label: str) -> bytes:
+        """Poll a retrieve job until complete and return ZIP bytes."""
         consecutive_failures = 0
         max_consecutive = 5
 
@@ -411,8 +448,8 @@ class SalesforceDataCloudService:
             except (requests.exceptions.RequestException, RuntimeError) as exc:
                 consecutive_failures += 1
                 log.warning(
-                    "  Poll %d failed (consecutive=%d/%d): %s",
-                    attempt + 1, consecutive_failures, max_consecutive, exc,
+                    "  %s poll %d failed (consecutive=%d/%d): %s",
+                    label, attempt + 1, consecutive_failures, max_consecutive, exc,
                 )
                 if consecutive_failures >= max_consecutive:
                     raise RuntimeError(
@@ -427,10 +464,7 @@ class SalesforceDataCloudService:
             state    = state_el.text if state_el is not None else "unknown"
 
             if done_el is None:
-                log.warning(
-                    "  Poll %d: SOAP response missing <done> element — treating as not done",
-                    attempt + 1,
-                )
+                log.warning("  %s poll %d: missing <done> element — treating as not done", label, attempt + 1)
 
             if done_el is not None and done_el.text == "true":
                 if state == "Failed":
@@ -440,24 +474,79 @@ class SalesforceDataCloudService:
                 zip_el = status_root.find(".//met:zipFile", SOAP_NS)
                 if zip_el is None or not zip_el.text:
                     raise RuntimeError("Retrieve completed but ZIP payload is empty.")
-                log.info("  Retrieved after %d poll(s) (%.1fs)", attempt + 1, time.monotonic() - t0)
                 return base64.b64decode(zip_el.text)
 
-            if attempt % 5 == 0:
-                log.info(
-                    "  Waiting for Salesforce metadata retrieve... poll %d/%d (status=%s)",
-                    attempt + 1, METADATA_MAX_POLLS, state,
-                )
-            else:
-                log.debug("  Poll %d/%d status=%s", attempt + 1, METADATA_MAX_POLLS, state)
+            log.debug("  %s poll %d/%d status=%s", label, attempt + 1, METADATA_MAX_POLLS, state)
             if attempt < METADATA_MAX_POLLS - 1:
                 time.sleep(METADATA_POLL_INTERVAL)
 
         raise TimeoutError(
-            f"Metadata retrieve did not complete within "
+            f"Batch retrieve did not complete within "
             f"{METADATA_MAX_POLLS * METADATA_POLL_INTERVAL:.0f}s. Async job ID: {async_id}. "
             f"Increase METADATA_MAX_POLLS or METADATA_POLL_INTERVAL, or check Salesforce org status."
         )
+
+    def fetch_metadata(self) -> bytes:
+        t0 = time.monotonic()
+        log.info("Step 3: Retrieving ObjectSourceTargetMap metadata from Salesforce")
+
+        # Fast list to discover all record names (~0.5s)
+        names = self._list_ostm_names()
+        if not names:
+            log.warning("  listMetadata returned 0 ObjectSourceTargetMap records")
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w"):
+                pass
+            return buf.getvalue()
+
+        batches = [names[i:i + METADATA_BATCH_SIZE] for i in range(0, len(names), METADATA_BATCH_SIZE)]
+        total_batches = len(batches)
+        log.info(
+            "  Found %d ObjectSourceTargetMap record(s) — retrieving in %d batch(es) of up to %d",
+            len(names), total_batches, METADATA_BATCH_SIZE,
+        )
+
+        combined_buf = io.BytesIO()
+        combined_zip = zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED)
+        batch_times: list = []
+
+        for i, batch in enumerate(batches):
+            batch_num = i + 1
+            batch_t0 = time.monotonic()
+            members_xml = "\n            ".join(
+                f"<met:members>{escape(n)}</met:members>" for n in batch
+            )
+            async_id = self._submit_retrieve(members_xml)
+            log.debug("  Batch %d/%d submitted (id=%s)", batch_num, total_batches, async_id)
+
+            zip_bytes = self._poll_retrieve(async_id, label=f"Batch {batch_num}/{total_batches}")
+            batch_elapsed = time.monotonic() - batch_t0
+            batch_times.append(batch_elapsed)
+
+            # Rolling average ETA over last 5 batches
+            window = batch_times[-5:]
+            avg = sum(window) / len(window)
+            remaining = total_batches - batch_num
+            if remaining > 0:
+                log.info(
+                    "  Batch %d/%d complete (%d record(s), %.1fs) — est. %s remaining",
+                    batch_num, total_batches, len(batch), batch_elapsed, _format_eta(avg * remaining),
+                )
+            else:
+                log.info(
+                    "  Batch %d/%d complete (%d record(s), %.1fs)",
+                    batch_num, total_batches, len(batch), batch_elapsed,
+                )
+
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
+                for name in batch_zf.namelist():
+                    if name.endswith("package.xml"):
+                        continue  # skip sidecar manifest — one copy already present
+                    combined_zip.writestr(name, batch_zf.read(name))
+
+        combined_zip.close()
+        log.info("  All %d record(s) retrieved in %.1fs", len(names), time.monotonic() - t0)
+        return combined_buf.getvalue()
 
     def parse_edges(self, zip_bytes: bytes, fallback_dataspace: str) -> list:
         """
