@@ -402,7 +402,7 @@ class SalesforceDataCloudService:
             raise RuntimeError(f"Salesforce SOAP fault [{code}]: {msg}")
         return root
 
-    def _list_ostm_names(self) -> list:
+    def _list_ostm_names(self) -> list[str]:
         """Call listMetadata to get all ObjectSourceTargetMap record names. Completes in <1s."""
         envelope = _LIST_METADATA_ENVELOPE.format(
             session_id=escape(self._token),
@@ -508,7 +508,7 @@ class SalesforceDataCloudService:
 
         combined_buf = io.BytesIO()
         combined_zip = zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED)
-        batch_times: list = []
+        batch_times: list[float] = []
 
         for i, batch in enumerate(batches):
             batch_num = i + 1
