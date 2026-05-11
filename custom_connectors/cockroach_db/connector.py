@@ -427,10 +427,10 @@ class QueryLanguageTemplates:
         return "{x} = ''"
 
     def get_regexp_expression_template(self) -> str:
-        return "{% if case_insensitive %}{x} ~* {{ regexp }}{% else %}{x} ~ {{ regexp }}{% endif %}"
+        return "{% if case_insensitive %}{x} ~* '{{ regexp }}'{% else %}{x} ~ '{{ regexp }}'{% endif %}"
 
     def get_regexp_count_expression_template(self) -> str:
-        return "CASE WHEN {% if case_insensitive %}{x} ~* {{ regexp }}{% else %}{x} ~ {{ regexp }}{% endif %} THEN 1 ELSE 0 END"
+        return "SUM(CASE WHEN {% if case_insensitive %}{x} ~* '{{ regexp }}'{% else %}{x} ~ '{{ regexp }}'{% endif %} THEN 1 ELSE 0 END)"
 
     ###################################################
     # QueryLanguage: Array and Timestamp Validation

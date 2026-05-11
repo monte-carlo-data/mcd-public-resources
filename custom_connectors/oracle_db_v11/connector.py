@@ -643,10 +643,10 @@ class QueryLanguageTemplates:
         return "({x} IS NULL OR {x} = '')"
 
     def get_regexp_expression_template(self) -> str:
-        return "{% if case_insensitive %}REGEXP_LIKE({x}, {{ regexp }}, 'i'){% else %}REGEXP_LIKE({x}, {{ regexp }}){% endif %}"
+        return "{% if case_insensitive %}REGEXP_LIKE({x}, '{{ regexp }}', 'i'){% else %}REGEXP_LIKE({x}, '{{ regexp }}'){% endif %}"
 
     def get_regexp_count_expression_template(self) -> str:
-        return "{% if case_insensitive %}REGEXP_COUNT({x}, {{ regexp }}, 1, 'i'){% else %}REGEXP_COUNT({x}, {{ regexp }}){% endif %}"
+        return "{% if case_insensitive %}SUM(REGEXP_COUNT({x}, '{{ regexp }}', 1, 'i')){% else %}SUM(REGEXP_COUNT({x}, '{{ regexp }}')){% endif %}"
 
     ###################################################
     # QueryLanguage: Array and Timestamp Validation
