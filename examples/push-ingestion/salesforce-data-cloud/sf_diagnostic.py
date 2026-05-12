@@ -16,12 +16,15 @@ Required env vars (or set in .env):
 """
 import base64
 import io
+import ipaddress
 import os
+import socket
 import sys
 import time
-import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
+from xml.etree.ElementTree import ParseError as _ETParseError
 from xml.sax.saxutils import escape
 
 import requests
@@ -37,9 +40,37 @@ except ImportError as err:
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 SF_API_VERSION = "62.0"
-METADATA_BATCH_SIZE = int(os.environ.get("METADATA_BATCH_SIZE", "10"))
-METADATA_MAX_POLLS = int(os.environ.get("METADATA_MAX_POLLS", "120"))
-METADATA_POLL_INTERVAL = float(os.environ.get("METADATA_POLL_INTERVAL", "5.0"))
+ZIP_MAX_FILES  = 10_000
+ZIP_MAX_BYTES  = 500 * 1024 * 1024  # 500 MB
+
+
+def _parse_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        val = int(raw)
+        if val < 1:
+            raise ValueError("must be >= 1")
+        return val
+    except ValueError as exc:
+        print(f"[FAIL] Invalid {name}={raw!r}: {exc}")
+        sys.exit(1)
+
+
+def _parse_positive_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, str(default))
+    try:
+        val = float(raw)
+        if val <= 0:
+            raise ValueError("must be > 0")
+        return val
+    except ValueError as exc:
+        print(f"[FAIL] Invalid {name}={raw!r}: {exc}")
+        sys.exit(1)
+
+
+METADATA_BATCH_SIZE    = _parse_positive_int("METADATA_BATCH_SIZE", 10)
+METADATA_MAX_POLLS     = _parse_positive_int("METADATA_MAX_POLLS", 120)
+METADATA_POLL_INTERVAL = _parse_positive_float("METADATA_POLL_INTERVAL", 5.0)
 
 SOAP_NS = {
     "soapenv": "http://schemas.xmlsoap.org/soap/envelope/",
@@ -123,7 +154,7 @@ def _format_eta(seconds: float) -> str:
     return f"{mins}m {secs:02d}s"
 
 
-def _soap_post(url: str, envelope: str, action: str) -> ET.Element:
+def _soap_post(url: str, envelope: str, action: str):
     resp = requests.post(
         url,
         data=envelope.encode("utf-8"),
@@ -136,7 +167,7 @@ def _soap_post(url: str, envelope: str, action: str) -> ET.Element:
     fault = root.find(".//soapenv:Fault", SOAP_NS)
     if fault is not None:
         code = fault.findtext("faultcode", default="unknown")
-        msg  = fault.findtext("faultstring", default="no detail")
+        msg  = (fault.findtext("faultstring", default="no detail") or "")[:200]
         _fail(f"SOAP fault [{code}]: {msg}")
         sys.exit(1)
     return root
@@ -156,7 +187,7 @@ def _poll_batch(url: str, token: str, async_id: str, label: str) -> bytes:
         if done_el is not None and done_el.text == "true":
             if state == "Failed":
                 err_code = status_root.findtext(".//met:errorStatusCode", default="", namespaces=SOAP_NS)
-                err_msg  = status_root.findtext(".//met:errorMessage",    default="", namespaces=SOAP_NS)
+                err_msg  = (status_root.findtext(".//met:errorMessage", default="", namespaces=SOAP_NS) or "")[:200]
                 _fail(f"Retrieve job failed [{err_code}]: {err_msg}")
                 sys.exit(1)
             zip_el = status_root.find(".//met:zipFile", SOAP_NS)
@@ -262,49 +293,62 @@ def check_metadata_retrieve(instance_url, token):
     _ok(f"Retrieving {len(names)} record(s) in {total_batches} batch(es) of up to {METADATA_BATCH_SIZE}")
 
     combined_buf = io.BytesIO()
-    combined_zip = zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED)
     batch_times: list = []
 
-    for i, batch in enumerate(batches):
-        batch_num = i + 1
-        batch_t0 = time.monotonic()
-        members_xml = "\n            ".join(
-            f"<met:members>{escape(n)}</met:members>" for n in batch
-        )
-        retrieve_envelope = _RETRIEVE_BATCH_ENVELOPE.format(
-            session_id=escape(token),
-            api_version=escape(SF_API_VERSION),
-            members=members_xml,
-        )
-        retrieve_root = _soap_post(url, retrieve_envelope, action="retrieve")
-        async_id_el = retrieve_root.find(".//met:id", SOAP_NS)
-        if async_id_el is None or not async_id_el.text:
-            _fail(f"Batch {batch_num}: no async job ID returned")
-            sys.exit(1)
-        async_id = async_id_el.text
-
-        zip_bytes = _poll_batch(url, token, async_id, label=f"Batch {batch_num}/{total_batches}")
-        batch_elapsed = time.monotonic() - batch_t0
-        batch_times.append(batch_elapsed)
-
-        window = batch_times[-5:]
-        avg = sum(window) / len(window)
-        remaining = total_batches - batch_num
-        if remaining > 0:
-            _ok(
-                f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), "
-                f"{batch_elapsed:.1f}s) — est. {_format_eta(avg * remaining)} remaining"
+    with zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED) as combined_zip:
+        for i, batch in enumerate(batches):
+            batch_num = i + 1
+            batch_t0 = time.monotonic()
+            members_xml = "\n            ".join(
+                f"<met:members>{escape(n)}</met:members>" for n in batch
             )
-        else:
-            _ok(f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), {batch_elapsed:.1f}s)")
+            retrieve_envelope = _RETRIEVE_BATCH_ENVELOPE.format(
+                session_id=escape(token),
+                api_version=escape(SF_API_VERSION),
+                members=members_xml,
+            )
+            retrieve_root = _soap_post(url, retrieve_envelope, action="retrieve")
+            async_id_el = retrieve_root.find(".//met:id", SOAP_NS)
+            if async_id_el is None or not async_id_el.text:
+                _fail(f"Batch {batch_num}: no async job ID returned")
+                sys.exit(1)
+            async_id = async_id_el.text
 
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
-            for name in batch_zf.namelist():
-                if name.endswith("package.xml"):
-                    continue
-                combined_zip.writestr(name, batch_zf.read(name))
+            zip_bytes = _poll_batch(url, token, async_id, label=f"Batch {batch_num}/{total_batches}")
+            batch_elapsed = time.monotonic() - batch_t0
+            batch_times.append(batch_elapsed)
 
-    combined_zip.close()
+            window = batch_times[-5:]
+            avg = sum(window) / len(window)
+            remaining = total_batches - batch_num
+            if remaining > 0:
+                _ok(
+                    f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), "
+                    f"{batch_elapsed:.1f}s) — est. {_format_eta(avg * remaining)} remaining"
+                )
+            else:
+                _ok(f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), {batch_elapsed:.1f}s)")
+
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
+                if len(batch_zf.namelist()) > ZIP_MAX_FILES:
+                    _fail(
+                        f"Batch {batch_num} ZIP contains more than {ZIP_MAX_FILES} files — "
+                        "aborting to prevent decompression bomb."
+                    )
+                    sys.exit(1)
+                batch_uncompressed = sum(info.file_size for info in batch_zf.infolist())
+                if batch_uncompressed > ZIP_MAX_BYTES:
+                    _fail(
+                        f"Batch {batch_num} ZIP uncompressed size "
+                        f"{batch_uncompressed / 1024 / 1024:.0f}MB exceeds safety limit "
+                        f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
+                    )
+                    sys.exit(1)
+                for name in batch_zf.namelist():
+                    if name.endswith("package.xml"):
+                        continue
+                    combined_zip.writestr(name, batch_zf.read(name))
+
     total_elapsed = time.monotonic() - t0
     _ok(f"All {len(names)} record(s) retrieved in {total_elapsed:.1f}s")
     return combined_buf.getvalue()
@@ -312,55 +356,66 @@ def check_metadata_retrieve(instance_url, token):
 
 def check_zip_contents(zip_bytes):
     _sep("4. ObjectSourceTargetMap — parse DLO→DMO edges")
-    zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    all_names = zf.namelist()
-    xml_files = [n for n in all_names if n.endswith(".objectSourceTargetMap")]
-    _ok(f"ZIP contains {len(all_names)} file(s) total")
-    _ok(f"ObjectSourceTargetMap records: {len(xml_files)}")
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        all_names = zf.namelist()
+        if len(all_names) > ZIP_MAX_FILES:
+            _fail(f"ZIP contains {len(all_names)} files — exceeds safety limit of {ZIP_MAX_FILES}.")
+            sys.exit(1)
+        total_uncompressed = sum(i.file_size for i in zf.infolist())
+        if total_uncompressed > ZIP_MAX_BYTES:
+            _fail(
+                f"ZIP total uncompressed size {total_uncompressed / 1024 / 1024:.0f}MB "
+                f"exceeds safety limit of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
+            )
+            sys.exit(1)
 
-    if not xml_files:
-        _warn("No .objectSourceTargetMap files found in ZIP")
-        _warn("Files present:")
-        for n in all_names[:20]:
-            _warn(f"  {n}")
-        return
+        xml_files = [n for n in all_names if n.endswith(".objectSourceTargetMap")]
+        _ok(f"ZIP contains {len(all_names)} file(s) total")
+        _ok(f"ObjectSourceTargetMap records: {len(xml_files)}")
 
-    edges = []
-    no_dataspace = 0
-    data_spaces_seen = set()
+        if not xml_files:
+            _warn("No .objectSourceTargetMap files found in ZIP")
+            _warn("Files present:")
+            for n in all_names[:20]:
+                _warn(f"  {n}")
+            return
 
-    for name in xml_files:
-        with zf.open(name) as f:
-            try:
-                root = SafeET.parse(f).getroot()
-            except ET.ParseError:
-                continue
-        source = root.findtext("sf:sourceObjectName", namespaces=OSTM_NS)
-        target = root.findtext("sf:targetObjectName", namespaces=OSTM_NS)
-        if not source or not target:
-            continue
-        if source.endswith("__dll") and target.endswith("__dlm"):
-            ds = root.findtext("sf:dataSpace", namespaces=OSTM_NS)
-            if ds:
-                data_spaces_seen.add(ds)
-            else:
-                no_dataspace += 1
-            edges.append((source, target, ds or "(none in XML)"))
+        edges = []
+        no_dataspace = 0
+        data_spaces_seen = set()
 
-    _ok(f"DLO→DMO edges found: {len(edges)}")
+        for name in xml_files:
+            with zf.open(name) as f:
+                try:
+                    root = SafeET.parse(f).getroot()
+                except _ETParseError:
+                    continue
+                source = root.findtext("sf:sourceObjectName", namespaces=OSTM_NS)
+                target = root.findtext("sf:targetObjectName", namespaces=OSTM_NS)
+                if not source or not target:
+                    continue
+                if source.endswith("__dll") and target.endswith("__dlm"):
+                    ds = root.findtext("sf:dataSpace", namespaces=OSTM_NS)
+                    if ds:
+                        data_spaces_seen.add(ds)
+                    else:
+                        no_dataspace += 1
+                    edges.append((source, target, ds or "(none in XML)"))
 
-    if data_spaces_seen:
-        _ok(f"Data spaces referenced in XML: {sorted(data_spaces_seen)}")
-    if no_dataspace:
-        _warn(
-            f"{no_dataspace}/{len(edges)} edges have no <dataSpace> field in XML. "
-            "The script will fall back to the value from the Dataspace SOQL query."
-        )
+        _ok(f"DLO→DMO edges found: {len(edges)}")
 
-    print()
-    print("  Edge list:")
-    for source, target, ds in edges:
-        print(f"    [{ds}] {source} → {target}")
+        if data_spaces_seen:
+            _ok(f"Data spaces referenced in XML: {sorted(data_spaces_seen)}")
+        if no_dataspace:
+            _warn(
+                f"{no_dataspace}/{len(edges)} edges have no <dataSpace> field in XML. "
+                "The script will fall back to the value from the Dataspace SOQL query."
+            )
+
+        print()
+        print("  Edge list:")
+        for source, target, ds in edges:
+            print(f"    [{ds}] {source} → {target}")
 
 
 def main():
@@ -372,11 +427,46 @@ def main():
     client_id     = os.environ.get("SF_CLIENT_ID", "")
     client_secret = os.environ.get("SF_CLIENT_SECRET", "")
 
-    missing = [n for n, v in [("SF_ORG_URL", instance_url), ("SF_CLIENT_ID", client_id), ("SF_CLIENT_SECRET", client_secret)] if not v]
+    missing = [
+        n for n, v in [
+            ("SF_ORG_URL", instance_url),
+            ("SF_CLIENT_ID", client_id),
+            ("SF_CLIENT_SECRET", client_secret),
+        ] if not v
+    ]
     if missing:
         print(f"\n[FAIL] Missing required env vars: {', '.join(missing)}")
         print("       Set them in a .env file or export them before running.")
         sys.exit(1)
+
+    # SSRF guard: reject non-HTTPS, embedded credentials, private/reserved IPs
+    _parsed = urlparse(instance_url)
+    if _parsed.scheme != "https" or not _parsed.hostname or "@" in (_parsed.netloc or ""):
+        print(f"[FAIL] SF_ORG_URL must be an HTTPS URL (got: {_parsed.scheme}://{_parsed.hostname or '<missing>'}).")
+        sys.exit(1)
+    _hostname = _parsed.hostname
+    if _hostname.lower() == "localhost":
+        print("[FAIL] SF_ORG_URL hostname is 'localhost' — refusing to connect.")
+        sys.exit(1)
+
+    def _is_internal(addr) -> bool:
+        return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast
+
+    try:
+        if _is_internal(ipaddress.ip_address(_hostname)):
+            print(f"[FAIL] SF_ORG_URL is a private/reserved IP ({_hostname}) — refusing to connect.")
+            sys.exit(1)
+    except ValueError:
+        try:
+            for _fam, _typ, _pro, _can, _sa in socket.getaddrinfo(_hostname, None):
+                try:
+                    if _is_internal(ipaddress.ip_address(_sa[0])):
+                        print(f"[FAIL] SF_ORG_URL resolves to a private IP ({_sa[0]}) — refusing to connect.")
+                        sys.exit(1)
+                except ValueError:
+                    pass
+        except socket.gaierror:
+            pass  # DNS failure — let the actual request surface a clear network error
 
     token = check_auth(instance_url, client_id, client_secret)
     check_data_spaces(instance_url, token)

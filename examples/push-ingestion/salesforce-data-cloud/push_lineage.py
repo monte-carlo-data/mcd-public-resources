@@ -37,13 +37,15 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import sys
 import time
 import uuid
-import xml.etree.ElementTree as ET
 import zipfile
+from xml.etree.ElementTree import ParseError as _ETParseError
+from xml.etree.ElementTree import tostring as _et_tostring
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -282,9 +284,18 @@ def _save_failed_edges(run_id: str, kind: str, edges: list) -> str:
 
 def _format_eta(seconds: float) -> str:
     if seconds < 60:
-        return f"{seconds:.0f}s"
+        return f"{seconds:.1f}s"
     mins, secs = divmod(int(seconds), 60)
     return f"{mins}m {secs:02d}s"
+
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9._\-]{60,}")
+
+
+def _safe_snippet(text: str, max_len: int = 200) -> str:
+    """Truncate and redact long token-like strings before logging API response bodies."""
+    cleaned = _TOKEN_RE.sub("[…]", text or "")
+    return cleaned[:max_len]
 
 
 # ── Salesforce service ────────────────────────────────────────────────────────
@@ -374,17 +385,17 @@ class SalesforceDataCloudService:
                 "'Manage Data Cloud' or 'API Access' permissions. "
                 "Salesforce error: %s. Falling back to 'default'. "
                 "Edges without <dataSpace> in XML may land in the wrong data space.",
-                resp.text[:300],
+                _safe_snippet(resp.text),
             )
         else:
             log.warning(
                 "  Could not query Dataspace object (status=%d, body=%s) — using 'default' as fallback",
-                resp.status_code, resp.text[:200],
+                resp.status_code, _safe_snippet(resp.text),
             )
         return ["default"]
 
     @_retrying
-    def _soap_post(self, body: str, action: str) -> ET.Element:
+    def _soap_post(self, body: str, action: str):
         url = f"{self.instance_url}/services/Soap/m/{SF_API_VERSION}"
         resp = requests.post(
             url,
@@ -398,7 +409,7 @@ class SalesforceDataCloudService:
         fault = root.find(".//soapenv:Fault", SOAP_NS)
         if fault is not None:
             code = fault.findtext("faultcode", default="unknown")
-            msg  = fault.findtext("faultstring", default="no detail")
+            msg  = _safe_snippet(fault.findtext("faultstring", default="no detail"))
             raise RuntimeError(f"Salesforce SOAP fault [{code}]: {msg}")
         return root
 
@@ -426,7 +437,7 @@ class SalesforceDataCloudService:
         async_id_el = root.find(".//met:id", SOAP_NS)
         if async_id_el is None:
             fault_el = root.find(".//met:error", SOAP_NS)
-            detail = ET.tostring(fault_el, encoding="unicode") if fault_el is not None else "no error element"
+            detail = _safe_snippet(_et_tostring(fault_el, encoding="unicode")) if fault_el is not None else "no error element"
             raise RuntimeError(f"Retrieve returned no async ID. Detail: {detail}")
         if not async_id_el.text:
             raise RuntimeError("Salesforce returned an empty async job ID for the metadata retrieve.")
@@ -461,7 +472,7 @@ class SalesforceDataCloudService:
 
             done_el  = status_root.find(".//met:done",   SOAP_NS)
             state_el = status_root.find(".//met:status", SOAP_NS)
-            state    = state_el.text if state_el is not None else "unknown"
+            state    = (state_el.text or "unknown") if state_el is not None else "unknown"
 
             if done_el is None:
                 log.warning("  %s poll %d: missing <done> element — treating as not done", label, attempt + 1)
@@ -469,7 +480,7 @@ class SalesforceDataCloudService:
             if done_el is not None and done_el.text == "true":
                 if state == "Failed":
                     err_code = status_root.findtext(".//met:errorStatusCode", default="", namespaces=SOAP_NS)
-                    err_msg  = status_root.findtext(".//met:errorMessage",    default="", namespaces=SOAP_NS)
+                    err_msg  = _safe_snippet(status_root.findtext(".//met:errorMessage", default="", namespaces=SOAP_NS))
                     raise RuntimeError(f"Salesforce retrieve job failed [{err_code}]: {err_msg}")
                 zip_el = status_root.find(".//met:zipFile", SOAP_NS)
                 if zip_el is None or not zip_el.text:
@@ -507,44 +518,55 @@ class SalesforceDataCloudService:
         )
 
         combined_buf = io.BytesIO()
-        combined_zip = zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED)
         batch_times: list[float] = []
 
-        for i, batch in enumerate(batches):
-            batch_num = i + 1
-            batch_t0 = time.monotonic()
-            members_xml = "\n            ".join(
-                f"<met:members>{escape(n)}</met:members>" for n in batch
-            )
-            async_id = self._submit_retrieve(members_xml)
-            log.debug("  Batch %d/%d submitted (id=%s)", batch_num, total_batches, async_id)
-
-            zip_bytes = self._poll_retrieve(async_id, label=f"Batch {batch_num}/{total_batches}")
-            batch_elapsed = time.monotonic() - batch_t0
-            batch_times.append(batch_elapsed)
-
-            # Rolling average ETA over last 5 batches
-            window = batch_times[-5:]
-            avg = sum(window) / len(window)
-            remaining = total_batches - batch_num
-            if remaining > 0:
-                log.info(
-                    "  Batch %d/%d complete (%d record(s), %.1fs) — est. %s remaining",
-                    batch_num, total_batches, len(batch), batch_elapsed, _format_eta(avg * remaining),
+        with zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED) as combined_zip:
+            for i, batch in enumerate(batches):
+                batch_num = i + 1
+                batch_t0 = time.monotonic()
+                members_xml = "\n            ".join(
+                    f"<met:members>{escape(n)}</met:members>" for n in batch
                 )
-            else:
-                log.info(
-                    "  Batch %d/%d complete (%d record(s), %.1fs)",
-                    batch_num, total_batches, len(batch), batch_elapsed,
-                )
+                async_id = self._submit_retrieve(members_xml)
+                log.debug("  Batch %d/%d submitted (id=%s)", batch_num, total_batches, async_id)
 
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
-                for name in batch_zf.namelist():
-                    if name.endswith("package.xml"):
-                        continue  # skip sidecar manifest — one copy already present
-                    combined_zip.writestr(name, batch_zf.read(name))
+                zip_bytes = self._poll_retrieve(async_id, label=f"Batch {batch_num}/{total_batches}")
+                batch_elapsed = time.monotonic() - batch_t0
+                batch_times.append(batch_elapsed)
 
-        combined_zip.close()
+                # Rolling average ETA over last 5 batches
+                window = batch_times[-5:]
+                avg = sum(window) / len(window)
+                remaining = total_batches - batch_num
+                if remaining > 0:
+                    log.info(
+                        "  Batch %d/%d complete (%d record(s), %.1fs) — est. %s remaining",
+                        batch_num, total_batches, len(batch), batch_elapsed, _format_eta(avg * remaining),
+                    )
+                else:
+                    log.info(
+                        "  Batch %d/%d complete (%d record(s), %.1fs)",
+                        batch_num, total_batches, len(batch), batch_elapsed,
+                    )
+
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
+                    if len(batch_zf.namelist()) > ZIP_MAX_FILES:
+                        raise RuntimeError(
+                            f"Batch {batch_num} ZIP contains more than {ZIP_MAX_FILES} files — "
+                            "aborting to prevent decompression bomb."
+                        )
+                    batch_uncompressed = sum(info.file_size for info in batch_zf.infolist())
+                    if batch_uncompressed > ZIP_MAX_BYTES:
+                        raise RuntimeError(
+                            f"Batch {batch_num} ZIP uncompressed size "
+                            f"{batch_uncompressed / 1024 / 1024:.0f}MB exceeds safety limit "
+                            f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
+                        )
+                    for name in batch_zf.namelist():
+                        if name.endswith("package.xml"):
+                            continue  # skip sidecar manifest — one copy already present
+                        combined_zip.writestr(name, batch_zf.read(name))
+
         log.info("  All %d record(s) retrieved in %.1fs", len(names), time.monotonic() - t0)
         return combined_buf.getvalue()
 
@@ -604,7 +626,7 @@ class SalesforceDataCloudService:
                 with zf.open(name) as f:
                     try:
                         root = SafeET.parse(f).getroot()
-                    except ET.ParseError as exc:
+                    except _ETParseError as exc:
                         log.warning("  Skipping %s: XML parse error: %s", name, exc)
                         skipped += 1
                         continue
@@ -691,7 +713,7 @@ class SalesforceDataCloudLineageService:
         except ValueError as exc:
             raise RuntimeError(
                 f"MC GraphQL returned non-JSON response (status={resp.status_code}). "
-                f"Response preview: {resp.text[:200]}"
+                f"Response preview: {_safe_snippet(resp.text)}"
             ) from exc
         if "errors" in body:
             msgs = [e.get("message", str(e)) for e in body["errors"]]
@@ -788,11 +810,12 @@ class SalesforceDataCloudLineageService:
     def validate_edges(self, edges: list) -> list:
         """
         Fetch all tables for the warehouse from MC in bulk, then validate each edge.
-        Extracts the authoritative data space from each table's MC catalog dataset field
-        and stamps it onto the returned edges — overriding the XML fallback from parse_edges().
-        Edges where either table is missing from the MC catalog, or where DLO and DMO
-        are catalogued under different data spaces, are removed and logged.
-        Returns the validated subset ready for push.
+        Resolves the DMO's authoritative data space first, then resolves the DLO
+        preferring the DMO's data space — so DLOs shared across multiple data spaces
+        (e.g. a DLO added to both 'default' and 'unified_knowledge') resolve to the
+        correct pairing rather than the XML fallback. Edges where either table is
+        missing from the MC catalog, or where the DLO is not available in the DMO's
+        data space, are removed and logged. Returns the validated subset ready for push.
         """
         if not edges:
             return edges
@@ -803,8 +826,9 @@ class SalesforceDataCloudLineageService:
         try:
             mc_catalog = self._fetch_mc_catalog()
         except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "unknown"
             raise RuntimeError(
-                f"MC catalog fetch returned {exc.response.status_code}. "
+                f"MC catalog fetch returned HTTP {status}. "
                 "Check MCD_ID/MCD_TOKEN."
             ) from exc
         except requests.exceptions.RequestException as exc:
@@ -853,9 +877,16 @@ class SalesforceDataCloudLineageService:
         mismatch_skips = 0
         for e in edges:
             preferred = e.get("data_space")
-            src_space = self._resolve_catalog(mc_catalog, e["source"], preferred_data_space=preferred)
+            # Resolve DMO first to get its authoritative data space, then resolve
+            # the DLO preferring the DMO's data space. DLOs can be explicitly shared
+            # across data spaces in Salesforce; a DLO in both 'default' and
+            # 'unified_knowledge' should pair with the DMO's space, not the XML fallback.
             tgt_space = self._resolve_catalog(mc_catalog, e["target"], preferred_data_space=preferred)
-            if src_space is None or tgt_space is None:
+            if tgt_space is None:
+                catalog_skips += 1
+                continue
+            src_space = self._resolve_catalog(mc_catalog, e["source"], preferred_data_space=tgt_space)
+            if src_space is None:
                 catalog_skips += 1
                 continue
             if src_space != tgt_space:
@@ -923,6 +954,11 @@ class SalesforceDataCloudLineageService:
             try:
                 resp = self._send_batch(svc, batch_events)
                 inv_id = svc.extract_invocation_id(resp)
+                if inv_id is None:
+                    log.warning(
+                        "  Batch %d/%d: push accepted but no invocation_id returned",
+                        batch_num, total_batches,
+                    )
                 invocation_ids.append(inv_id)
                 log.info(
                     "  Batch %d/%d: %d edge(s) pushed — invocation_id=%s",
@@ -930,6 +966,7 @@ class SalesforceDataCloudLineageService:
                 )
             except Exception as exc:
                 log.error("  Batch %d/%d failed: %s", batch_num, total_batches, exc)
+                log.debug("  Batch %d/%d exception detail:", batch_num, total_batches, exc_info=True)
                 failures.extend(batch_edges)
 
         if failures:
@@ -977,6 +1014,14 @@ def main() -> None:
     mcd_id            = _require("MCD_ID")
     mcd_token         = _require("MCD_TOKEN")
     mcd_resource_uuid = _require("MCD_RESOURCE_UUID")
+    try:
+        uuid.UUID(mcd_resource_uuid)
+    except ValueError:
+        log.error(
+            "MCD_RESOURCE_UUID is not a valid UUID format. "
+            "Copy the value from Monte Carlo Settings → Integrations."
+        )
+        sys.exit(1)
 
     # SSRF guard: reject non-HTTPS, embedded credentials, private/reserved IPs (literal and DNS)
     _parsed_url = urlparse(sf_instance_url)
@@ -984,7 +1029,7 @@ def main() -> None:
         log.error(
             "SF_ORG_URL is not a valid HTTPS URL (got: %s). "
             "Expected format: https://myorg.my.salesforce.com",
-            sf_instance_url,
+            f"{_parsed_url.scheme}://{_parsed_url.hostname or '<missing>'}",
         )
         sys.exit(1)
 
@@ -1030,7 +1075,16 @@ def main() -> None:
         except socket.gaierror:
             pass  # DNS failure — let the actual request surface a clear network error
 
+    sf_instance_url = sf_instance_url.rstrip("/")
+
     default_dataspace = os.environ.get("SF_DEFAULT_DATA_SPACE", "default")
+    if not re.match(r"^[A-Za-z0-9_]{1,80}$", default_dataspace):
+        log.error(
+            "SF_DEFAULT_DATA_SPACE=%r is not a valid data space name. "
+            "Use alphanumeric characters and underscores only (1–80 chars).",
+            default_dataspace,
+        )
+        sys.exit(1)
 
     sf_svc = SalesforceDataCloudService(sf_instance_url, sf_client_id, sf_client_secret)
     lineage_svc = SalesforceDataCloudLineageService(
@@ -1064,7 +1118,8 @@ def main() -> None:
         log.error("Fatal error during data collection: %s", exc)
         sys.exit(1)
     except Exception as exc:
-        log.exception("Unexpected error during data collection: %s", exc)
+        log.error("Unexpected error during data collection: %s: %s", type(exc).__name__, exc)
+        log.debug("Traceback:", exc_info=True)
         sys.exit(2)
 
     log.info("DLO->DMO edges (%d total):", len(dlo_edges))
@@ -1097,7 +1152,8 @@ def main() -> None:
         log.error("Push failed: %s", exc)
         sys.exit(1)
     except Exception as exc:
-        log.exception("Unexpected error during push: %s", exc)
+        log.error("Unexpected error during push: %s: %s", type(exc).__name__, exc)
+        log.debug("Traceback:", exc_info=True)
         sys.exit(2)
 
     elapsed = time.monotonic() - t_start
