@@ -1,0 +1,21 @@
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    unzip \
+    libaio-dev \
+    && ARCH=$(dpkg --print-architecture) \
+    && if [ "$ARCH" = "arm64" ]; then \
+         wget -q https://download.oracle.com/otn_software/linux/instantclient/1924000/instantclient-basic-linux.arm64-19.24.0.0.0dbru.zip -O /tmp/instantclient.zip; \
+       else \
+         wget -q https://download.oracle.com/otn_software/linux/instantclient/1924000/instantclient-basic-linux.x64-19.24.0.0.0dbru.zip -O /tmp/instantclient.zip; \
+       fi \
+    && mkdir -p /opt/oracle \
+    && unzip /tmp/instantclient.zip -d /opt/oracle \
+    && rm /tmp/instantclient.zip \
+    && ln -sf /usr/lib/$(uname -m)-linux-gnu/libaio.so.1t64 /usr/lib/$(uname -m)-linux-gnu/libaio.so.1 \
+    && echo /opt/oracle/instantclient_19_24 > /etc/ld.so.conf.d/oracle-instantclient.conf \
+    && ldconfig \
+    && apt-get purge -y wget unzip \
+    && apt-get autoremove -y \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient_19_24:${LD_LIBRARY_PATH}
