@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Data 360 DLO->DMO Lineage Push (Pandora Push Model)
+Data 360 Lineage Push — DLO→DMO and DMO→CIO (Pandora Push Model)
 
 Pipeline:
   1. Authenticate with Salesforce via OAuth client credentials
@@ -9,7 +9,10 @@ Pipeline:
   4. Parse DLO->DMO edges; assign preliminary data space from XML field or fallback
   4b. Validate tables exist in MC catalog; overwrite data space with authoritative
       value from MC catalog dataset field
-  5. Push DLO->DMO lineage to Monte Carlo via pycarlo IngestionService
+  5. Fetch Calculated Insight Objects (CIOs) via Data Cloud REST API
+  6. Parse DMO->CIO edges by extracting table references from each CIO's SQL expression
+  7. Push DLO->DMO lineage to Monte Carlo via pycarlo IngestionService
+  8. Push DMO->CIO lineage to Monte Carlo via pycarlo IngestionService
 
 Usage:
   python3 push_lineage.py --dry-run
@@ -44,8 +47,7 @@ import sys
 import time
 import uuid
 import zipfile
-from xml.etree.ElementTree import ParseError as _ETParseError
-from xml.etree.ElementTree import tostring as _et_tostring
+from defusedxml.ElementTree import ParseError as _ETParseError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -114,14 +116,25 @@ METADATA_BATCH_SIZE    = _parse_positive_int("METADATA_BATCH_SIZE", 10)
 METADATA_MAX_POLLS     = _parse_positive_int("METADATA_MAX_POLLS", 120)
 METADATA_POLL_INTERVAL = _parse_positive_float("METADATA_POLL_INTERVAL", 5.0)
 
-ZIP_MAX_FILES = 10_000
-ZIP_MAX_BYTES = 500 * 1024 * 1024  # 500 MB
+ZIP_MAX_FILES  = 10_000
+ZIP_MAX_BYTES  = 500 * 1024 * 1024  # 500 MB
+# Safety ceiling on paginated API calls to prevent infinite loops if the API
+# returns a non-null next-page cursor indefinitely (server bug or misconfiguration).
+MAX_CIO_PAGES     = 1_000
+MAX_CATALOG_PAGES = 5_000
 
 OSTM_NS = {"sf": "http://soap.sforce.com/2006/04/metadata"}
 SOAP_NS = {
     "soapenv": "http://schemas.xmlsoap.org/soap/envelope/",
     "met":     "http://soap.sforce.com/2006/04/metadata",
 }
+
+# Matches any Data Cloud object name (DMO or CIO) anywhere in SQL text.
+# Scanning the full expression — rather than only FROM/JOIN clauses — means
+# subqueries, CTEs, and any other SQL structure are handled automatically.
+# The suffixes __dlm (DMO) and __cio (CIO) are unique to table objects;
+# fields use __c, so false positives are not a concern.
+_DATA_OBJECT_RE = re.compile(r"\b([A-Za-z0-9_]+(?:__dlm|__cio))\b", re.IGNORECASE)
 
 # ── SOAP envelope templates ───────────────────────────────────────────────────
 _LIST_METADATA_ENVELOPE = """\
@@ -292,6 +305,21 @@ def _format_eta(seconds: float) -> str:
 _TOKEN_RE = re.compile(r"[A-Za-z0-9._\-]{60,}")
 
 
+def _parse_sql_inputs(sql: str, cio_api_name: str = "") -> set:
+    """
+    Extract DMO (__dlm) and CIO (__cio) table references from a CIO SQL expression
+    by scanning the full SQL text. This handles subqueries, CTEs, schema-qualified
+    names, and any SQL structure — no clause-level parsing required.
+    The CIO's own api_name is excluded so self-references don't appear as inputs.
+    Results are lowercased to match MC catalog lookup keys and avoid mixed-case
+    pushes when SQL uses non-canonical casing (e.g. ACCOUNT__DLM vs Account__dlm).
+    """
+    found = {name.lower() for name in _DATA_OBJECT_RE.findall(sql)}
+    if cio_api_name:
+        found.discard(cio_api_name.lower())
+    return found
+
+
 def _safe_snippet(text: str, max_len: int = 200) -> str:
     """Truncate and redact long token-like strings before logging API response bodies."""
     cleaned = _TOKEN_RE.sub("[…]", text or "")
@@ -337,7 +365,8 @@ class SalesforceDataCloudService:
             )
         if "error" in data:
             raise RuntimeError(
-                f"Salesforce auth failed: {data.get('error')} — {data.get('error_description')}"
+                f"Salesforce auth failed: {data.get('error')} — "
+                f"{(data.get('error_description') or '')[:200]}"
             )
         resp.raise_for_status()
         self._token = data["access_token"]
@@ -437,7 +466,7 @@ class SalesforceDataCloudService:
         async_id_el = root.find(".//met:id", SOAP_NS)
         if async_id_el is None:
             fault_el = root.find(".//met:error", SOAP_NS)
-            detail = _safe_snippet(_et_tostring(fault_el, encoding="unicode")) if fault_el is not None else "no error element"
+            detail = _safe_snippet(fault_el.findtext("faultstring") or fault_el.findtext("message") or "(no detail)") if fault_el is not None else "no error element"
             raise RuntimeError(f"Retrieve returned no async ID. Detail: {detail}")
         if not async_id_el.text:
             raise RuntimeError("Salesforce returned an empty async job ID for the metadata retrieve.")
@@ -519,6 +548,7 @@ class SalesforceDataCloudService:
 
         combined_buf = io.BytesIO()
         batch_times: list[float] = []
+        cumulative_uncompressed = 0
 
         with zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED) as combined_zip:
             for i, batch in enumerate(batches):
@@ -562,10 +592,27 @@ class SalesforceDataCloudService:
                             f"{batch_uncompressed / 1024 / 1024:.0f}MB exceeds safety limit "
                             f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
                         )
+                    cumulative_uncompressed += batch_uncompressed
+                    if cumulative_uncompressed > ZIP_MAX_BYTES:
+                        raise RuntimeError(
+                            f"Cumulative uncompressed size across {batch_num} batch(es) "
+                            f"({cumulative_uncompressed / 1024 / 1024:.0f}MB) exceeds safety limit "
+                            f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
+                        )
                     for name in batch_zf.namelist():
                         if name.endswith("package.xml"):
                             continue  # skip sidecar manifest — one copy already present
-                        combined_zip.writestr(name, batch_zf.read(name))
+                        if "\x00" in name:
+                            log.warning("  Skipping ZIP entry with null byte in filename")
+                            continue
+                        # Strip leading slashes, normalize backslashes, and remove any
+                        # path-traversal (. and ..) components before writing to the combined ZIP.
+                        safe_name = name.lstrip("/").replace("\\", "/")
+                        parts = [p for p in safe_name.split("/") if p and p not in (".", "..")]
+                        safe_name = "/".join(parts)
+                        if not safe_name:
+                            continue
+                        combined_zip.writestr(safe_name, batch_zf.read(name))
 
         log.info("  All %d record(s) retrieved in %.1fs", len(names), time.monotonic() - t0)
         return combined_buf.getvalue()
@@ -672,6 +719,117 @@ class SalesforceDataCloudService:
         log.info("  %d DLO->DMO edge(s) extracted (%.1fs)", len(edges), time.monotonic() - t0)
         return edges
 
+    def _validate_same_origin(self, url: str) -> str:
+        """Return absolute URL, rejecting any nextPageUrl that crosses origin or uses non-HTTPS."""
+        parsed_base = urlparse(self.instance_url)
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            # Relative path — must start with / to prevent user-info injection
+            # (e.g. '@evil.com/...' would make the hostname the attacker's domain).
+            if not url.startswith("/"):
+                raise RuntimeError(
+                    f"CIO pagination nextPageUrl is a relative path that does not start with '/': {url!r}"
+                )
+            return f"{self.instance_url.rstrip('/')}{url}"
+        if parsed.scheme != "https":
+            raise RuntimeError(
+                f"CIO pagination nextPageUrl uses scheme '{parsed.scheme}' — only HTTPS is permitted."
+            )
+        if parsed.hostname != parsed_base.hostname:
+            raise RuntimeError(
+                f"CIO pagination nextPageUrl hostname '{parsed.hostname}' does not match "
+                f"SF_ORG_URL hostname '{parsed_base.hostname}' — aborting to prevent SSRF."
+            )
+        return url
+
+    @_retrying
+    def _fetch_cio_page(self, url: str) -> dict:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {self._token}"},
+            verify=True,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_calculated_insights(self) -> list:
+        """Fetch all CIOs from the Data Cloud REST API, paginating via nextPageUrl."""
+        t0 = time.monotonic()
+        log.info("Step 5: Fetching Calculated Insight Objects (CIOs) from Salesforce")
+        items = []
+        url: Optional[str] = (
+            f"{self.instance_url}/services/data/v{SF_API_VERSION}/ssot/calculated-insights"
+        )
+        page = 0
+        while url:
+            page += 1
+            if page > MAX_CIO_PAGES:
+                raise RuntimeError(
+                    f"CIO pagination exceeded {MAX_CIO_PAGES} pages — possible infinite loop. "
+                    "Check Salesforce API for a looping nextPageUrl."
+                )
+            data = self._fetch_cio_page(url)
+            collection = data.get("collection", {})
+            batch = collection.get("items", [])
+            items.extend(batch)
+            log.debug("  CIO page %d: %d item(s)", page, len(batch))
+            next_url = collection.get("nextPageUrl") or None
+            url = self._validate_same_origin(next_url) if next_url else None
+        log.info("  Found %d CIO(s) (%.1fs)", len(items), time.monotonic() - t0)
+        return items
+
+    def parse_cio_edges(self, cio_items: list) -> list:
+        """
+        Parse DMO→CIO and CIO→CIO edges from each CIO's SQL expression.
+        Inputs are found by scanning the full SQL expression for __dlm/__cio tokens:
+          __dlm suffix → DMO input
+          __cio suffix → chained CIO input
+        Data space comes directly from the CIO object (no fallback needed).
+        """
+        t0 = time.monotonic()
+        log.info("Step 6: Parsing DMO->CIO edges from CIO SQL expressions")
+        edges = []
+        skipped = 0
+        processed_cio_count = 0
+
+        for cio in cio_items:
+            api_name = cio.get("apiName", "")
+            if not api_name.endswith("__cio"):
+                log.debug("  Skipping non-CIO object: %s", api_name)
+                continue
+            processed_cio_count += 1
+            data_space = cio.get("dataSpace") or "default"
+            sql = cio.get("expression") or ""
+            if not sql:
+                log.warning("  CIO '%s' has no SQL expression — skipping", api_name)
+                skipped += 1
+                continue
+            inputs = _parse_sql_inputs(sql, cio_api_name=api_name)
+            log.debug(
+                "  CIO '%s': SQL length=%d, inputs found=%s",
+                api_name, len(sql), sorted(inputs) or "(none)",
+            )
+            if not inputs:
+                log.warning(
+                    "  CIO '%s': no __dlm or __cio inputs found in SQL expression — skipping. "
+                    "Run with LOG_LEVEL=DEBUG to inspect the full expression.",
+                    api_name,
+                )
+                skipped += 1
+                continue
+            target = api_name.lower()
+            for src in sorted(inputs):
+                edges.append({"source": src, "target": target, "data_space": data_space})
+
+        log.info(
+            "  %d DMO->CIO edge(s) extracted from %d CIO(s) (%.1fs)",
+            len(edges), processed_cio_count - skipped, time.monotonic() - t0,
+        )
+        if skipped:
+            log.warning("  Skipped %d CIO(s) (no expression or no recognized inputs)", skipped)
+        return edges
+
 
 # ── Monte Carlo lineage service ───────────────────────────────────────────────
 class SalesforceDataCloudLineageService:
@@ -736,6 +894,11 @@ class SalesforceDataCloudLineageService:
 
         while True:
             page += 1
+            if page > MAX_CATALOG_PAGES:
+                raise RuntimeError(
+                    f"MC catalog pagination exceeded {MAX_CATALOG_PAGES} pages — possible infinite loop. "
+                    "Check MC GraphQL API for a looping endCursor."
+                )
             variables: dict = {"dwId": self.resource_uuid}
             if after:
                 variables["after"] = after
@@ -764,8 +927,9 @@ class SalesforceDataCloudLineageService:
                 if table_name in catalog:
                     existing = catalog[table_name]
                     if isinstance(existing, list):
-                        existing.append(data_space)
-                    else:
+                        if data_space not in existing:
+                            existing.append(data_space)
+                    elif existing != data_space:
                         catalog[table_name] = [existing, data_space]
                 else:
                     catalog[table_name] = data_space
@@ -846,8 +1010,8 @@ class SalesforceDataCloudLineageService:
         missing_set: set = set()
 
         for name in unique_names:
-            if mc_catalog.get(name.lower()) is not None:
-                entry = mc_catalog[name.lower()]
+            entry = mc_catalog.get(name.lower())
+            if entry is not None:
                 ds = entry[0] if isinstance(entry, list) else entry
                 log.debug("  Found in MC catalog: %s (data space: %s)", name, ds)
             else:
@@ -914,9 +1078,15 @@ class SalesforceDataCloudLineageService:
             events=events,
         )
 
-    def push_edges(self, edges: list, run_id: str) -> list:
+    def push_edges(
+        self,
+        edges: list,
+        run_id: str,
+        step_label: str = "Step 7",
+        edge_kind: str = "dlo_dmo",
+    ) -> list:
         t0 = time.monotonic()
-        log.info("Step 5: Pushing %d DLO->DMO edge(s) via Ingest API", len(edges))
+        log.info("%s: Pushing %d %s edge(s) via Ingest API", step_label, len(edges), edge_kind.replace("_", "->").upper())
 
         svc = IngestionService(mc_client=Client(session=Session(
             mcd_id=self.ingest_key_id,
@@ -970,12 +1140,16 @@ class SalesforceDataCloudLineageService:
                 failures.extend(batch_edges)
 
         if failures:
-            path = _save_failed_edges(run_id, "dlo_dmo", failures)
+            path = _save_failed_edges(run_id, edge_kind, failures)
+            label = edge_kind.replace("_", "->").upper()
             raise RuntimeError(
-                f"{len(failures)} DLO->DMO edge(s) failed to push. "
+                f"{len(failures)} {label} edge(s) failed to push. "
                 f"Failed edges saved for retry: {path}"
             )
-        log.info("  All %d DLO->DMO edge(s) pushed (%.1fs)", len(edges), time.monotonic() - t0)
+        log.info(
+            "  All %d %s edge(s) pushed (%.1fs)",
+            len(edges), edge_kind.replace("_", "->").upper(), time.monotonic() - t0,
+        )
         return invocation_ids
 
 
@@ -986,12 +1160,17 @@ def main() -> None:
     log = _setup_logging(run_id)
 
     parser = argparse.ArgumentParser(
-        description="Push Salesforce Data 360 DLO->DMO lineage to Monte Carlo"
+        description="Push Salesforce Data 360 DLO->DMO and DMO->CIO lineage to Monte Carlo"
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Fetch live data and preview edges, but skip the MC push",
+    )
+    parser.add_argument(
+        "--skip-cio",
+        action="store_true",
+        help="Run DLO->DMO only; skip CIO fetch and DMO->CIO push",
     )
     args = parser.parse_args()
 
@@ -1001,8 +1180,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     log.info(
-        "=== Data 360 Lineage Push | run_id=%s%s ===",
-        run_id, " [DRY RUN]" if args.dry_run else "",
+        "=== Data 360 Lineage Push | run_id=%s%s%s ===",
+        run_id,
+        " [DRY RUN]" if args.dry_run else "",
+        " [DLO->DMO only]" if args.skip_cio else "",
     )
     t_start = time.monotonic()
 
@@ -1109,10 +1290,20 @@ def main() -> None:
                 fallback_space,
             )
 
-        # Steps 3-4b
+        # Steps 3-4b: DLO→DMO
         zip_bytes = sf_svc.fetch_metadata()
         dlo_edges = sf_svc.parse_edges(zip_bytes, fallback_space)
         dlo_edges = lineage_svc.validate_edges(dlo_edges)
+
+        # Steps 5-6: DMO→CIO (skipped if --skip-cio)
+        # CIO catalog validation: DMO source tables were already validated in step 4b.
+        # CIO objects themselves may not yet be in the MC catalog if a metadata scan
+        # has not run since they were created; the push is idempotent and MC will
+        # register them on receipt.
+        cio_edges: list = []
+        if not args.skip_cio:
+            cio_items = sf_svc.fetch_calculated_insights()
+            cio_edges = sf_svc.parse_cio_edges(cio_items)
 
     except (RuntimeError, TimeoutError, requests.exceptions.RequestException) as exc:
         log.error("Fatal error during data collection: %s", exc)
@@ -1126,10 +1317,15 @@ def main() -> None:
     for e in dlo_edges:
         log.info("  [%s] %s -> %s", e["data_space"], e["source"], e["target"])
 
-    if not dlo_edges:
+    if not args.skip_cio:
+        log.info("DMO->CIO edges (%d total):", len(cio_edges))
+        for e in cio_edges:
+            log.info("  [%s] %s -> %s", e["data_space"], e["source"], e["target"])
+
+    if not dlo_edges and not cio_edges:
         log.warning(
-            "0 DLO->DMO edges ready to push. "
-            "If Step 4b removed all edges: trigger a metadata sync in Monte Carlo "
+            "0 edges ready to push. "
+            "If Step 4b removed all DLO->DMO edges: trigger a metadata sync in Monte Carlo "
             "(Settings → Integrations → your Data Cloud connection) then re-run. "
             "If Step 4 also found 0 edges: confirm DLO→DMO mappings exist in your Salesforce org."
         )
@@ -1137,30 +1333,60 @@ def main() -> None:
 
     if args.dry_run:
         log.info(
-            "[dry-run] Would push %d DLO->DMO edge(s) to Monte Carlo warehouse UUID=%s. "
-            "Run without --dry-run to commit.",
-            len(dlo_edges), mcd_resource_uuid,
+            "[dry-run] Would push %d DLO->DMO and %d DMO->CIO edge(s) to Monte Carlo "
+            "warehouse UUID=%s. Run without --dry-run to commit.",
+            len(dlo_edges), len(cio_edges), mcd_resource_uuid,
         )
         sys.exit(0)
 
-    try:
-        all_invocation_ids = lineage_svc.push_edges(dlo_edges, run_id)
-    except KeyboardInterrupt:
-        log.warning("Interrupted during push — partial results may have been written to Monte Carlo.")
-        sys.exit(1)
-    except RuntimeError as exc:
-        log.error("Push failed: %s", exc)
-        sys.exit(1)
-    except Exception as exc:
-        log.error("Unexpected error during push: %s: %s", type(exc).__name__, exc)
-        log.debug("Traceback:", exc_info=True)
-        sys.exit(2)
+    dmo_invocation_ids: list = []
+    cio_invocation_ids: list = []
 
+    # Step 7: Push DLO→DMO
+    if dlo_edges:
+        try:
+            dmo_invocation_ids = lineage_svc.push_edges(
+                dlo_edges, run_id, step_label="Step 7", edge_kind="dlo_dmo"
+            )
+        except KeyboardInterrupt:
+            log.warning("Interrupted during DLO->DMO push — partial results may have been written.")
+            sys.exit(1)
+        except RuntimeError as exc:
+            log.error("DLO->DMO push failed: %s", exc)
+            sys.exit(1)
+        except Exception as exc:
+            log.error("Unexpected error during DLO->DMO push: %s: %s", type(exc).__name__, exc)
+            log.debug("Traceback:", exc_info=True)
+            sys.exit(2)
+    else:
+        log.info("Step 7: No DLO->DMO edges to push — skipping")
+
+    # Step 8: Push DMO→CIO
+    if cio_edges and not args.skip_cio:
+        try:
+            cio_invocation_ids = lineage_svc.push_edges(
+                cio_edges, run_id, step_label="Step 8", edge_kind="dmo_cio"
+            )
+        except KeyboardInterrupt:
+            log.warning("Interrupted during DMO->CIO push — partial results may have been written.")
+            sys.exit(1)
+        except RuntimeError as exc:
+            log.error("DMO->CIO push failed: %s", exc)
+            sys.exit(1)
+        except Exception as exc:
+            log.error("Unexpected error during DMO->CIO push: %s: %s", type(exc).__name__, exc)
+            log.debug("Traceback:", exc_info=True)
+            sys.exit(2)
+    elif not args.skip_cio:
+        log.info("Step 8: No DMO->CIO edges to push — skipping")
+
+    all_invocation_ids = dmo_invocation_ids + cio_invocation_ids
     elapsed = time.monotonic() - t_start
     log.info(
-        "=== Run complete | run_id=%s | %.1fs | DLO->DMO=%d | invocation_ids=[%s] ===",
+        "=== Run complete | run_id=%s | %.1fs | DLO->DMO=%d | DMO->CIO=%d | invocation_ids=[%s] ===",
         run_id, elapsed,
         len(dlo_edges),
+        len(cio_edges),
         ", ".join(str(iid) for iid in all_invocation_ids if iid is not None) or "none",
     )
 

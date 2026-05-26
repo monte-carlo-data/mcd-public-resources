@@ -1,8 +1,13 @@
-# Data 360 DLO→DMO Lineage Push
+# Data 360 Lineage Push — DLO→DMO and DMO→CIO
 
-Pushes Salesforce Data 360 DLO→DMO lineage into Monte Carlo so your data transformation
+Pushes Salesforce Data 360 lineage into Monte Carlo so your full data transformation
 pipeline appears as observable, trusted lineage inside Monte Carlo's data catalog —
 the observability layer for your Agentforce data.
+
+Covers two lineage hops in a single run:
+
+- **DLO→DMO** — raw Data Lake Objects mapped to harmonized Data Model Objects
+- **DMO→CIO** — Data Model Objects feeding Calculated Insight Objects (metrics/aggregations)
 
 This is a standalone Python script. It has no external service dependencies beyond
 Salesforce and Monte Carlo. Run it on any machine that can reach both APIs, or schedule
@@ -12,7 +17,7 @@ it as a cron job.
 
 ## What It Does
 
-The script runs a five-step pipeline:
+The script runs an eight-step pipeline:
 
 1. **Authenticate with Salesforce** — client-credentials OAuth flow using your connected
    app credentials. A single token covers all data spaces (no per-dataspace credentials needed).
@@ -27,10 +32,30 @@ The script runs a five-step pipeline:
     prevent cross-org contamination), then validates each DLO and DMO against that result
     locally. Edges for uncatalogued tables are skipped and logged, so you can see exactly
     what's missing and re-run once the connector syncs.
-5. **Push lineage to Monte Carlo** — sends validated edges to Monte Carlo's Ingest API in
-   batches with automatic retry. Failed batches are saved to a local JSON file for retry.
+5. **Fetch Calculated Insight Objects** — calls the Data Cloud REST API
+   (`/ssot/calculated-insights`) to retrieve all CIOs and their SQL expressions.
+6. **Parse DMO→CIO edges** — scans each CIO's SQL expression for `__dlm` and `__cio`
+   tokens to determine which DMOs (and other CIOs) feed into it. Handles subqueries,
+   CTEs, fan-in (multiple DMOs → one CIO), and CIO chains (CIO → CIO).
+7. **Push DLO→DMO lineage to Monte Carlo** — sends validated edges to Monte Carlo's
+   Ingest API in batches with automatic retry.
+8. **Push DMO→CIO lineage to Monte Carlo** — sends CIO edges to Monte Carlo's Ingest API
+   in batches with automatic retry.
 
-Lineage pushed: all DLO→DMO mappings configured in the org (e.g. `Account__dll` → `Account__dlm`).
+Lineage pushed:
+- All DLO→DMO mappings configured in the org (e.g. `Account__dll` → `Account__dlm`)
+- All DMO→CIO relationships derived from CIO SQL expressions (e.g. `Account__dlm` → `Account_Metrics__cio`)
+
+### About Calculated Insight Objects (CIOs)
+
+CIOs are Salesforce Data 360's metric and aggregation layer — SQL-defined objects that
+compute counts, sums, and other calculations on top of DMOs. They are the analytics
+surface above the harmonized data model. The script reads the SQL expression from each
+CIO to determine which DMOs feed it, then pushes those edges to Monte Carlo.
+
+CIOs may not appear in the Monte Carlo catalog immediately after a push if the native
+Data Cloud connector has not yet synced them. The push is idempotent — re-running after
+the next connector sync will correctly link the CIO assets.
 
 ---
 
@@ -120,8 +145,9 @@ Before running the full script, you can validate Salesforce connectivity indepen
 python3 sf_diagnostic.py
 ```
 
-This tests OAuth auth, the Dataspace SOQL query, the SOAP Metadata API retrieve, and
-parses the resulting XML — printing timing, edge count, and data space information.
+This tests OAuth auth, the Dataspace SOQL query, the SOAP Metadata API retrieve, parses
+the resulting XML, and calls the Calculated Insights REST endpoint — printing timing,
+edge count, and data space information for all pipeline steps.
 Useful for handing to a Salesforce admin to confirm API access before involving MC credentials.
 
 ---
@@ -134,10 +160,10 @@ Useful for handing to a Salesforce admin to confirm API access before involving 
 python3 push_lineage.py --dry-run
 ```
 
-This runs every step — authenticates, retrieves metadata, resolves data spaces, validates
-catalog coverage — but skips the final push to Monte Carlo. You will see every edge that
-*would* be pushed, along with the target Monte Carlo warehouse UUID. Use this to validate all
-credentials and confirm the expected edges are found before committing anything.
+This runs every step — authenticates, retrieves metadata, fetches CIOs, resolves data
+spaces, validates catalog coverage — but skips the final push to Monte Carlo. You will
+see every edge that *would* be pushed. Use this to validate all credentials and confirm
+the expected edges are found before committing anything.
 
 Example output:
 
@@ -148,23 +174,24 @@ Example output:
 [10:42:04] [INFO   ] [run=a1b2c3d4] Step 2: Fetching Salesforce data spaces
 [10:42:04] [INFO   ] [run=a1b2c3d4]   Found 1 data space(s): ['default']
 [10:42:04] [INFO   ] [run=a1b2c3d4] Step 3: Retrieving ObjectSourceTargetMap metadata
-[10:42:04] [INFO   ] [run=a1b2c3d4]   Retrieve job started
-[10:42:08] [INFO   ] [run=a1b2c3d4]   Waiting for Salesforce metadata retrieve... poll 1/120
-[10:42:15] [INFO   ] [run=a1b2c3d4]   Retrieved after 3 poll(s) (11.2s)
+[10:42:15] [INFO   ] [run=a1b2c3d4]   All 27 record(s) retrieved in 20.4s
 [10:42:15] [INFO   ] [run=a1b2c3d4] Step 4: Parsing DLO->DMO edges from metadata
-[10:42:15] [INFO   ] [run=a1b2c3d4]   Found 26 ObjectSourceTargetMap record(s)
-[10:42:15] [INFO   ] [run=a1b2c3d4]   20 DLO->DMO edge(s) extracted (0.1s)
+[10:42:15] [INFO   ] [run=a1b2c3d4]   20 DLO->DMO edge(s) extracted (0.0s)
 [10:42:15] [INFO   ] [run=a1b2c3d4] Step 4b: Validating DLO and DMO tables exist in Monte Carlo catalog
-[10:42:15] [INFO   ] [run=a1b2c3d4]   Catalog fetch page 1: 40 table(s) retrieved so far
-[10:42:28] [INFO   ] [run=a1b2c3d4]   Fetched 40 table(s) from MC catalog (13.1s)
-[10:42:28] [INFO   ] [run=a1b2c3d4]   Catalog check complete: 40 matched, 0 not in catalog (13.1s)
+[10:42:28] [INFO   ] [run=a1b2c3d4]   Catalog check complete: 40 matched, 0 not in catalog (1.1s)
 [10:42:28] [INFO   ] [run=a1b2c3d4]   20 edge(s) ready to push
-[10:42:28] [INFO   ] [run=a1b2c3d4] DLO->DMO edges (20 total):
-[10:42:28] [INFO   ] [run=a1b2c3d4]   [default] Account__dll -> Account__dlm
-[10:42:28] [INFO   ] [run=a1b2c3d4]   [default] Contact__dll -> Contact__dlm
+[10:42:28] [INFO   ] [run=a1b2c3d4] Step 5: Fetching Calculated Insight Objects (CIOs) from Salesforce
+[10:42:29] [INFO   ] [run=a1b2c3d4]   Found 5 CIO(s) (0.9s)
+[10:42:29] [INFO   ] [run=a1b2c3d4] Step 6: Parsing DMO->CIO edges from CIO SQL expressions
+[10:42:29] [INFO   ] [run=a1b2c3d4]   8 DMO->CIO edge(s) extracted from 5 CIO(s) (0.0s)
+[10:42:29] [INFO   ] [run=a1b2c3d4] DLO->DMO edges (20 total):
+[10:42:29] [INFO   ] [run=a1b2c3d4]   [default] Account__dll -> Account__dlm
 ...
-[10:42:28] [INFO   ] [run=a1b2c3d4] [dry-run] Would push 20 DLO->DMO edge(s) to Monte Carlo
-                                    warehouse UUID=abc123.... Run without --dry-run to commit.
+[10:42:29] [INFO   ] [run=a1b2c3d4] DMO->CIO edges (8 total):
+[10:42:29] [INFO   ] [run=a1b2c3d4]   [default] Account__dlm -> Account_Metrics__cio
+...
+[10:42:29] [INFO   ] [run=a1b2c3d4] [dry-run] Would push 20 DLO->DMO and 8 DMO->CIO edge(s) to
+                                    Monte Carlo warehouse UUID=abc123.... Run without --dry-run to commit.
 ```
 
 ### Step 2 — Live push
@@ -175,9 +202,20 @@ python3 push_lineage.py
 
 On success the final log line contains:
 - `run_id` — unique identifier for this run (appears in every log line)
-- DLO→DMO edge count
-- `invocation_ids` — Monte Carlo's receipt tokens; keep these if you need to report
-  an issue to Monte Carlo support
+- DLO→DMO and DMO→CIO edge counts
+- `invocation_ids` — Monte Carlo's receipt tokens for both push steps; keep these if
+  you need to report an issue to Monte Carlo support
+
+### DLO→DMO only (skip CIO)
+
+```bash
+python3 push_lineage.py --skip-cio
+```
+
+Skips Steps 5–6 and the DMO→CIO push entirely. Use this if:
+- Your org has no CIOs yet
+- Step 5 returns a 403 and you only need DLO→DMO lineage right now
+- You want to test DLO→DMO in isolation before enabling the full pipeline
 
 ---
 
@@ -248,10 +286,11 @@ If one or more batches fail during the Monte Carlo push, the script saves the fa
 edges to a JSON file in the same directory as `push_lineage.py`:
 
 ```
-failed_edges_dlo_dmo_<run_id>_<timestamp>.json
+failed_edges_dlo_dmo_<run_id>_<timestamp>.json   # DLO→DMO failures
+failed_edges_dmo_cio_<run_id>_<timestamp>.json   # DMO→CIO failures
 ```
 
-The file is created with owner-only permissions (mode 0600) and is excluded from
+Each file is created with owner-only permissions (mode 0600) and is excluded from
 version control via `.gitignore`. The script exits with code `1` after saving.
 Re-run after resolving the issue — the push is idempotent so duplicate edges are
 safe to re-send.
@@ -273,13 +312,15 @@ and end of every run) and the `invocation_ids` from the final log line.
 
 ```
 Salesforce Data 360 org
-  └── SOAP Metadata API → ObjectSourceTargetMap → DLO→DMO edges
+  ├── SOAP Metadata API → ObjectSourceTargetMap → DLO→DMO edges
+  └── Data Cloud REST API → Calculated Insights → DMO→CIO edges (SQL parsed)
 
 Monte Carlo GraphQL API
   └── Catalog validation (DLO and DMO table presence check)
 
 Monte Carlo Ingest API
-  └── Lineage push (batched, idempotent, with automatic retry)
+  ├── Step 7: DLO→DMO lineage push (batched, idempotent, with automatic retry)
+  └── Step 8: DMO→CIO lineage push (batched, idempotent, with automatic retry)
 ```
 
 ---
