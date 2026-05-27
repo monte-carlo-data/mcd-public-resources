@@ -172,6 +172,61 @@ Run with `LOG_LEVEL=DEBUG` to see the specific error.
 
 ---
 
+## CIO / DMO→CIO Issues
+
+### Step 5 returns HTTP 403 (CIO fetch fails)
+
+The connected app does not have permission to call the Data Cloud REST API
+(`/services/data/v62.0/ssot/calculated-insights`). This is a different permission from
+the Metadata API used in Step 3.
+
+**What to do:**
+1. In Salesforce Setup → App Manager → your connected app → Edit
+2. Under **OAuth Scopes**, ensure **"Access and manage your data (api)"** and
+   **"Perform requests on your behalf at any time (refresh_token, offline_access)"** are included
+3. Ensure the run-as user has the **Data Cloud Admin** or **Data Cloud User** permission set assigned
+4. Re-authenticate (client credentials tokens may need to be refreshed)
+
+If you only need DLO→DMO lineage and cannot resolve the CIO permission, use `--skip-cio`
+to bypass Steps 5–6 entirely:
+
+```bash
+python3 push_lineage.py --skip-cio
+```
+
+### `Found 0 CIO(s)` at Step 5
+
+The API call succeeded but the org has no Calculated Insight Objects. This is not an error.
+- If you expect CIOs to exist, confirm they have been created and activated in Data 360
+  (Setup → Data Cloud → Calculated Insights)
+- The script will still push DLO→DMO edges normally; it just has no DMO→CIO edges to push
+
+### DMO→CIO edges pushed but not visible in Monte Carlo lineage graph
+
+CIO objects may not yet appear in the Monte Carlo catalog if the native Data Cloud
+connector has not synced since the CIOs were created. The lineage edges were accepted
+by Monte Carlo's Ingest API, but the CIO asset pages will not appear until after the
+next connector metadata sync.
+
+**What to do:**
+1. In Monte Carlo, go to **Settings → Integrations → your Data Cloud connection**
+2. Trigger a manual metadata sync
+3. Re-run the script after the sync completes — the push is idempotent and re-running
+   will correctly link the now-synced CIO assets
+
+### `no __dlm or __cio inputs found in SQL expression` warning
+
+The script could not identify any DMO or CIO input tables in a CIO's SQL expression.
+Possible causes:
+- The CIO uses an unusual SQL pattern (subquery aliasing, function-only expressions)
+- The CIO's `expression` field is null or empty in the API response
+
+Run with `LOG_LEVEL=DEBUG` to see the SQL length and exact token scan results for each
+CIO. If the SQL is visible and the inputs look correct, contact Monte Carlo support with
+the CIO's `apiName` and SQL expression.
+
+---
+
 ## Push Errors
 
 ### `failed_edges_*.json` file created
@@ -247,3 +302,4 @@ If you're unsure where a problem is, work through this list:
 - [ ] `MCD_RESOURCE_UUID` is set to the Data Cloud warehouse UUID from Monte Carlo UI
 - [ ] `--dry-run` completes successfully before attempting a live push
 - [ ] Monte Carlo Data Cloud connector has completed at least one metadata scan (required for catalog validation)
+- [ ] Connected app has Data Cloud REST API access (required for Step 5 CIO fetch — use `--skip-cio` if not needed)

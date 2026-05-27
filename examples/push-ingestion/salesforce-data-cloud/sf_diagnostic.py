@@ -24,7 +24,7 @@ import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
-from xml.etree.ElementTree import ParseError as _ETParseError
+from defusedxml.ElementTree import ParseError as _ETParseError
 from xml.sax.saxutils import escape
 
 import requests
@@ -218,7 +218,11 @@ def check_auth(instance_url, client_id, client_secret):
         timeout=30,
         verify=True,
     )
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        _fail(f"Non-JSON response from auth endpoint (HTTP {resp.status_code}): {resp.text[:200]}")
+        sys.exit(1)
     if "error" in data:
         _fail(f"Auth failed: {data.get('error')} — {data.get('error_description')}")
         sys.exit(1)
@@ -256,7 +260,8 @@ def check_data_spaces(instance_url, token):
         _warn(
             "Multiple data spaces found. The lineage push script will use the data space "
             "recorded in each ObjectSourceTargetMap XML record. If a record has no <dataSpace> "
-            "field, it will fall back to the first data space returned here."
+            "field, it will fall back to SF_DEFAULT_DATA_SPACE (default: 'default'). "
+            "Set SF_DEFAULT_DATA_SPACE if your primary data space has a different name."
         )
     return spaces
 
@@ -294,6 +299,7 @@ def check_metadata_retrieve(instance_url, token):
 
     combined_buf = io.BytesIO()
     batch_times: list = []
+    cumulative_uncompressed = 0
 
     with zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED) as combined_zip:
         for i, batch in enumerate(batches):
@@ -344,10 +350,26 @@ def check_metadata_retrieve(instance_url, token):
                         f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
                     )
                     sys.exit(1)
+                cumulative_uncompressed += batch_uncompressed
+                if cumulative_uncompressed > ZIP_MAX_BYTES:
+                    _fail(
+                        f"Cumulative uncompressed size across {batch_num} batch(es) "
+                        f"({cumulative_uncompressed / 1024 / 1024:.0f}MB) exceeds safety limit "
+                        f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
+                    )
+                    sys.exit(1)
                 for name in batch_zf.namelist():
                     if name.endswith("package.xml"):
                         continue
-                    combined_zip.writestr(name, batch_zf.read(name))
+                    if "\x00" in name:
+                        print(f"  [WARN] Skipping ZIP entry with null byte in filename")
+                        continue
+                    safe_name = name.lstrip("/").replace("\\", "/")
+                    parts = [p for p in safe_name.split("/") if p and p not in (".", "..")]
+                    safe_name = "/".join(parts)
+                    if not safe_name:
+                        continue
+                    combined_zip.writestr(safe_name, batch_zf.read(name))
 
     total_elapsed = time.monotonic() - t0
     _ok(f"All {len(names)} record(s) retrieved in {total_elapsed:.1f}s")
@@ -418,6 +440,100 @@ def check_zip_contents(zip_bytes):
             print(f"    [{ds}] {source} → {target}")
 
 
+def check_calculated_insights(instance_url, token):
+    _sep("5. Data Cloud REST API — Calculated Insights (CIOs)")
+    t0 = time.monotonic()
+    base_url = f"{instance_url}/services/data/v{SF_API_VERSION}/ssot/calculated-insights"
+    parsed_base = urlparse(instance_url)
+
+    items = []
+    next_url = base_url
+    page = 0
+    max_pages = 1_000
+
+    while next_url:
+        page += 1
+        if page > max_pages:
+            _warn(f"CIO pagination exceeded {max_pages} pages — stopping. Check for looping nextPageUrl.")
+            break
+        try:
+            resp = requests.get(
+                next_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+                verify=True,
+            )
+        except requests.exceptions.RequestException as exc:
+            _fail(f"Request failed (page {page}): {exc}")
+            return
+
+        if resp.status_code == 403:
+            elapsed = time.monotonic() - t0
+            _warn(f"HTTP 403 Forbidden ({elapsed:.1f}s) — the connected app lacks Data Cloud REST API access.")
+            _warn("To resolve: ensure the connected app OAuth scopes include 'api' and the")
+            _warn("run-as user has the 'Data Cloud Admin' or 'Data Cloud User' permission set.")
+            _warn("If DLO→DMO lineage is all you need, use --skip-cio when running push_lineage.py.")
+            return
+
+        if resp.status_code != 200:
+            _fail(f"HTTP {resp.status_code} (page {page}): {resp.text[:200]}")
+            return
+
+        try:
+            data = resp.json()
+        except ValueError:
+            _fail(f"Non-JSON response (page {page}): {resp.text[:200]}")
+            return
+
+        collection = data.get("collection", {})
+        batch = collection.get("items", [])
+        items.extend(batch)
+
+        raw_next = collection.get("nextPageUrl") or None
+        if raw_next:
+            parsed_next = urlparse(raw_next)
+            if not parsed_next.scheme:
+                if not raw_next.startswith("/"):
+                    _fail(f"Unexpected relative nextPageUrl (does not start with '/'): {raw_next[:200]!r} — pagination stopped, CIO list above may be incomplete.")
+                    return
+                next_url = f"{instance_url.rstrip('/')}{raw_next}"
+            elif parsed_next.scheme != "https" or parsed_next.hostname != parsed_base.hostname:
+                _fail(f"Cross-origin or non-HTTPS nextPageUrl: {raw_next[:200]!r} — pagination stopped, CIO list above may be incomplete.")
+                return
+            else:
+                next_url = raw_next
+        else:
+            next_url = None
+
+    elapsed = time.monotonic() - t0
+    _ok(f"Found {len(items)} CIO(s) across {page} page(s) in {elapsed:.1f}s")
+
+    if not items:
+        _warn("No Calculated Insight Objects found in org.")
+        _warn("If you expect CIOs, confirm they have been created and activated in")
+        _warn("Data Cloud Setup → Calculated Insights. This is not an error — the")
+        _warn("push script will simply push 0 DMO→CIO edges.")
+        return
+
+    no_expression = 0
+    print()
+    print("  CIO list (apiName | dataSpace | has SQL expression):")
+    for cio in items:
+        name = cio.get("apiName", "(unknown)")
+        space = cio.get("dataSpace", "(none)")
+        has_expr = bool(cio.get("expression"))
+        status = "yes" if has_expr else "NO — expression is null"
+        print(f"    {name} | {space} | {status}")
+        if not has_expr:
+            no_expression += 1
+
+    if no_expression:
+        _warn(
+            f"{no_expression}/{len(items)} CIO(s) have no SQL expression. "
+            "These will be skipped during the lineage push."
+        )
+
+
 def main():
     print("=" * 60)
     print("  Salesforce Data 360 — Lineage Push Diagnostic")
@@ -472,6 +588,7 @@ def main():
     check_data_spaces(instance_url, token)
     zip_bytes = check_metadata_retrieve(instance_url, token)
     check_zip_contents(zip_bytes)
+    check_calculated_insights(instance_url, token)
 
     _sep()
     print("  Diagnostic complete — all Salesforce APIs accessible.")
