@@ -740,6 +740,11 @@ class SalesforceDataCloudService:
                 f"CIO pagination nextPageUrl hostname '{parsed.hostname}' does not match "
                 f"SF_ORG_URL hostname '{parsed_base.hostname}' — aborting to prevent SSRF."
             )
+        if parsed.port != parsed_base.port:
+            raise RuntimeError(
+                f"CIO pagination nextPageUrl port '{parsed.port}' does not match "
+                f"SF_ORG_URL port '{parsed_base.port}' — aborting to prevent SSRF."
+            )
         return url
 
     @_retrying
@@ -751,7 +756,13 @@ class SalesforceDataCloudService:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            raise RuntimeError(
+                f"Non-JSON response from CIO endpoint (HTTP {resp.status_code}): "
+                f"{_safe_snippet(resp.text)}"
+            )
 
     def fetch_calculated_insights(self) -> list:
         """Fetch all CIOs from the Data Cloud REST API, paginating via nextPageUrl."""
