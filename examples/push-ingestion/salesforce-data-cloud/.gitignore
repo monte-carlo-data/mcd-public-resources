@@ -42,8 +42,10 @@ $RECYCLE.BIN/
 # Local environment variables
 .env
 
-# Failed-edge retry files from push_lineage.py
+# Runtime output files from push_lineage.py and push_external_lineage.py
 failed_edges_*.json
+skipped_streams_*.json
+discover_*.json
 
 # Python Salesforce Functions
 **/__pycache__/

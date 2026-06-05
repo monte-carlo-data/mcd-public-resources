@@ -1,0 +1,1880 @@
+#!/usr/bin/env python3
+"""
+Data 360 External Source → DLO Lineage Push
+
+Pushes CRM→DLO and Snowflake→DLO lineage edges into Monte Carlo using the
+createOrUpdateLineageEdge GraphQL mutation so that external source tables
+appear as trusted lineage upstream of Data 360 Data Lake Objects.
+
+Only sources that already exist as first-class objects in a Monte Carlo
+warehouse catalog (CRM tables, Snowflake tables) are linked. Sources that
+require custom node creation (e.g. S3 files) are out of scope.
+
+Pipeline:
+  1. Authenticate with Salesforce (platform OAuth — org-wide, same token for all data spaces)
+  2. Fetch all Data Streams from the Salesforce Connect REST API
+  3. Fetch MC catalog tables for Data Cloud, CRM, and/or Snowflake warehouses
+  4. Match each stream's source table and DLO to MC catalog entries
+  5. Push lineage edges via createOrUpdateLineageEdge GraphQL mutation
+
+Usage:
+  python3 push_external_lineage.py --dry-run
+  python3 push_external_lineage.py
+  python3 push_external_lineage.py --discover   # scan DSO connector types, no MC push
+
+Required env vars (see .env.example):
+  SF_ORG_URL, SF_CLIENT_ID, SF_CLIENT_SECRET
+  MCD_ID, MCD_TOKEN              — Personal API key (catalog lookup + lineage push)
+                                   Note: this integration uses a single Personal API key for
+                                   both catalog lookups (getTables) and lineage push
+                                   (createOrUpdateLineageEdge). No separate Ingestion key is
+                                   needed; invocation_ids are a Pandora Ingestion-API concept
+                                   and do not apply to the GraphQL mutation path used here.
+  MCD_DC_WAREHOUSE_UUID          — Monte Carlo Data Cloud warehouse UUID
+
+Optional env vars:
+  MCD_CRM_WAREHOUSE_UUID         — MC CRM warehouse UUID (single-org fallback)
+  MCD_CRM_WAREHOUSE_MAP          — Multi-org CRM map: "connector_id1=uuid1,connector_id2=uuid2"
+                                   connector_id is the DataConnectorId from DataStreamDefinition.
+                                   Used for linked/external CRM org streams; native same-org
+                                   streams fall back to MCD_CRM_WAREHOUSE_UUID.
+                                   Takes precedence over MCD_CRM_WAREHOUSE_UUID when set.
+  MCD_SNOWFLAKE_WAREHOUSE_UUID   — MC Snowflake warehouse UUID (single-warehouse fallback)
+  MCD_SNOWFLAKE_WAREHOUSE_MAP    — Multi-warehouse map: "account_id=uuid,account_id2=uuid2"
+                                   account_id is the Snowflake account identifier extracted from
+                                   the accountUrl in MktDataConnection (e.g. "hdb68299.us-west-2")
+                                   Takes precedence over MCD_SNOWFLAKE_WAREHOUSE_UUID when set.
+  LOG_LEVEL                      — DEBUG/INFO/WARNING/ERROR (default: INFO)
+  LOG_FORMAT                     — json for structured output (default: plain)
+"""
+import argparse
+import ipaddress
+import json
+import logging
+import os
+import re
+import signal
+import sys
+import threading
+import time
+import uuid as uuid_module
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import NamedTuple, Optional
+from urllib.parse import urlparse
+
+import requests
+from dotenv import load_dotenv
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+SF_API_VERSION = "62.0"
+MC_GRAPHQL_URL = "https://api.getmontecarlo.com/graphql"
+
+_CONNECTOR_SFDC = "SalesforceDotCom"
+_CONNECTOR_SNOWFLAKE = "SNOWFLAKE"
+_SUPPORTED_CONNECTORS = {_CONNECTOR_SFDC, _CONNECTOR_SNOWFLAKE}
+
+# Safety ceiling for pagination loops — prevents runaway fetches from a buggy/malicious API
+_MAX_PAGES = 500
+
+# Maximum response body size allowed before JSON parsing — guards against memory exhaustion
+# from a malicious or misconfigured server sending a very large response body.
+_MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50 MB
+
+# Batch size for SOQL IN clauses — keeps each query well under URL and record-count limits.
+# Salesforce Tooling API returns at most 2000 records per response; batching at 200 keeps
+# each batch comfortably under that limit and avoids URL length errors at scale.
+_TOOLING_SOQL_BATCH_SIZE = 200
+
+# Maximum per-retry sleep for 429 rate-limit responses
+_RETRY_AFTER_MAX = 30.0
+
+# Salesforce DeveloperName / API Name: alphanumeric + underscore, 1-255 chars.
+# Used to validate names before embedding in SOQL IN clauses.
+_SF_DEVELOPER_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,255}$")
+
+# Salesforce record ID: 15 or 18 alphanumeric characters.
+# Validated before embedding in Tooling API URL paths.
+_SF_ID_RE = re.compile(r"^[A-Za-z0-9]{15,18}$")
+
+# Snowflake account URL: must be exactly https://<account>.snowflakecomputing.com.
+# Rejects subdomain-bypass attempts (e.g. foo.snowflakecomputing.com.evil.snowflakecomputing.com).
+_SNOWFLAKE_ACCT_URL_RE = re.compile(
+    r"^https://[a-z0-9][a-z0-9\-\.]*\.snowflakecomputing\.com(?::\d+)?/?$",
+    re.IGNORECASE,
+)
+
+# Log-injection hardening: BIDI override characters and ANSI escape sequences.
+_BIDI_OVERRIDES = frozenset([
+    "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+    "\u200e", "\u200f", "\u2066", "\u2067", "\u2068", "\u2069",
+])
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+# Param names that may contain credentials — redacted before writing to disk.
+_SENSITIVE_PARAM_NAMES = frozenset({
+    "password", "secret", "token", "key", "apikey", "api_key",
+    "clientsecret", "client_secret", "accesskey", "access_key",
+    "secretaccesskey", "secret_access_key", "privatekey", "private_key",
+    "sessiontoken", "session_token",
+    "passphrase",
+    "pkcs8privatekey", "pkcs8_private_key",
+    "sshprivatekey", "ssh_private_key",
+    "bearertoken", "bearer_token",
+    "oauthtoken", "oauth_token",
+})
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        data: dict = {
+            "ts":     datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level":  record.levelname,
+            "run_id": getattr(record, "run_id", ""),
+            "msg":    record.getMessage(),
+        }
+        if record.exc_info:
+            data["exc"] = self.formatException(record.exc_info)
+        return json.dumps(data)
+
+
+class _RunIdFilter(logging.Filter):
+    def __init__(self, run_id: str) -> None:
+        super().__init__()
+        self.run_id = run_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = self.run_id  # type: ignore[attr-defined]
+        return True
+
+
+def _setup_logging(run_id: str) -> logging.Logger:
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    _valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+    if level_name not in _valid_levels:
+        print(
+            f"WARNING: Unknown LOG_LEVEL={level_name!r}, using INFO. "
+            f"Valid values: {', '.join(_valid_levels)}",
+            file=sys.stderr,
+        )
+        level_name = "INFO"
+    level = getattr(logging, level_name, logging.INFO)
+
+    use_json = os.environ.get("LOG_FORMAT", "").lower() == "json"
+    plain_fmt = logging.Formatter(
+        "[%(asctime)s] [%(levelname)-7s] [run=%(run_id)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    json_fmt = _JsonFormatter()
+
+    # stderr handler
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.addFilter(_RunIdFilter(run_id))
+    stderr_handler.setFormatter(json_fmt if use_json else plain_fmt)
+
+    # file handler — always plain text regardless of LOG_FORMAT so it's human-readable
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_path = Path(__file__).parent / f"run_{run_id}_{ts}.log"
+    # Create the log file with 0o600 permissions (owner read/write only).
+    # os.umask(0o177) masks off group/other bits so FileHandler creates it at 0o600.
+    _old_umask = os.umask(0o177)
+    try:
+        file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
+    finally:
+        os.umask(_old_umask)
+    file_handler.addFilter(_RunIdFilter(run_id))
+    file_handler.setFormatter(plain_fmt)
+
+    logger = logging.getLogger("push_external_lineage")
+    logger.setLevel(level)
+    logger.handlers = [stderr_handler, file_handler]
+    logger.propagate = False
+
+    # Announce the log file path on stderr before any other output
+    print(f"[run={run_id}] Log file: {log_path.resolve()}", file=sys.stderr)
+    return logger
+
+
+log: logging.Logger = logging.getLogger("push_external_lineage")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _require(name: str) -> str:
+    val = os.environ.get(name)
+    if not val:
+        log.error(
+            "Required environment variable '%s' is not set. "
+            "Set it in your .env file (see .env.example for the expected format).",
+            name,
+        )
+        sys.exit(1)
+    return val
+
+
+def _sanitize_for_log(value: str, max_len: int = 300) -> str:
+    """Strip control/injection characters from API strings before embedding in logs."""
+    out = value.replace("\n", " ").replace("\r", " ").replace("\t", " ").replace("\x00", "")
+    out = out.replace("\u2028", " ").replace("\u2029", " ")  # Unicode line/paragraph separators
+    out = _ANSI_ESCAPE_RE.sub("", out)
+    out = "".join(" " if c in _BIDI_OVERRIDES else c for c in out)
+    return out[:max_len]
+
+
+def _url_for_log(url: str) -> str:
+    """Strip query string from a URL before logging — keeps SOQL queries and cursors out of logs."""
+    return urlparse(url)._replace(query="").geturl()
+
+
+class MCGraphQLError(RuntimeError):
+    """Raised for application-level GraphQL errors (error array in response body).
+
+    These are permanent failures that must NOT be retried — the server understood the
+    request and rejected it. Transport errors (network, 5xx) use RuntimeError/RequestException.
+    """
+
+
+def _redact_params(params: dict) -> dict:
+    """Return a copy of params with sensitive values replaced by '<redacted>'."""
+    redacted: dict = {}
+    for k, v in params.items():
+        redacted[k] = "<redacted>" if k.lower().replace("-", "_") in _SENSITIVE_PARAM_NAMES else v
+    return redacted
+
+
+def _sanitize_stream_for_disk(stream: dict) -> dict:
+    """Return a stream dict with credential-bearing nested dicts redacted.
+
+    Covers connectorInfo.connectorDetails (nested and top-level) and advancedAttributes,
+    which may contain Snowflake passwords, S3 keys, or other secrets embedded in the
+    Salesforce API response. Non-dict values are replaced with {} rather than crashing.
+    """
+    result = dict(stream)
+    connector_info = dict(result.get("connectorInfo") or {})
+    if "connectorDetails" in connector_info:
+        cd = connector_info.get("connectorDetails")
+        connector_info["connectorDetails"] = _redact_params(cd if isinstance(cd, dict) else {})
+    result["connectorInfo"] = connector_info
+    if "connectorDetails" in result:
+        cd = result.get("connectorDetails")
+        result["connectorDetails"] = _redact_params(cd if isinstance(cd, dict) else {})
+    if "advancedAttributes" in result:
+        aa = result.get("advancedAttributes")
+        result["advancedAttributes"] = _redact_params(aa if isinstance(aa, dict) else {})
+    return result
+
+
+def _validate_uuid(name: str, value: str) -> None:
+    """Validate that value is a well-formed UUID; exit with a clear error if not."""
+    try:
+        uuid_module.UUID(value)
+    except ValueError:
+        log.error(
+            "Environment variable '%s' is not a valid UUID (got: %r). "
+            "Find the correct UUID in Monte Carlo: Settings → Integrations → your connection.",
+            name, value,
+        )
+        sys.exit(1)
+
+
+def _extract_sf_account_identifier(account_url: str) -> str:
+    """Extract lowercased account identifier from a Snowflake accountUrl.
+
+    'https://HDB68299.us-west-2.snowflakecomputing.com' → 'hdb68299.us-west-2'
+    'https://xy12345.snowflakecomputing.com'            → 'xy12345'
+    """
+    parsed = urlparse(account_url)
+    hostname = (parsed.hostname or "").lower()
+    suffix = ".snowflakecomputing.com"
+    if hostname.endswith(suffix):
+        return hostname[: -len(suffix)]
+    return hostname
+
+
+def _parse_warehouse_map(raw: str) -> dict:
+    """Parse a warehouse map env var into {key.lower(): uuid}.
+
+    Format: 'key1=uuid1,key2=uuid2'
+    Logs a warning for any entry that cannot be parsed (missing '=', empty key, or empty uuid).
+    """
+    if len(raw) > 8192:
+        # Truncate at the last complete comma boundary to avoid a split key=uuid entry
+        raw = raw[:8192]
+        last_comma = raw.rfind(",")
+        if last_comma != -1:
+            raw = raw[:last_comma]
+        log.warning(
+            "Warehouse map env var is unexpectedly long — truncated to last complete entry"
+        )
+    result: dict = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            log.warning("Warehouse map entry %r is malformed (expected key=uuid) — skipped", pair)
+            continue
+        key, uuid_val = pair.split("=", 1)
+        key = key.strip().lower()
+        uuid_val = uuid_val.strip()
+        if not key or not uuid_val:
+            log.warning(
+                "Warehouse map entry %r has empty key or UUID after parsing — skipped", pair
+            )
+            continue
+        result[key] = uuid_val
+    return result
+
+
+def _http(
+    method: str,
+    url: str,
+    *,
+    max_retries: int = 3,
+    backoff_base: float = 1.0,
+    **kwargs,
+) -> requests.Response:
+    """HTTP with exponential backoff, 429 rate-limit handling, and 5xx retry.
+
+    Defaults allow_redirects=False to prevent redirect-based SSRF — callers that need
+    redirects must explicitly pass allow_redirects=True.
+    """
+    kwargs.setdefault("allow_redirects", False)
+    kwargs.setdefault("timeout", 30)  # safety net — all callers should set explicitly
+    _log_url = _url_for_log(url)  # strip query string before any log calls
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.request(method, url, **kwargs)
+        except requests.exceptions.RequestException as exc:
+            if attempt >= max_retries:
+                raise
+            wait = backoff_base * (2 ** attempt)
+            log.warning(
+                "HTTP %s %s failed (attempt %d/%d): %s — retrying in %.1fs",
+                method, _log_url, attempt + 1, max_retries + 1, exc, wait,
+            )
+            time.sleep(wait)
+            continue
+
+        if resp.status_code == 429:
+            if attempt >= max_retries:
+                resp.raise_for_status()
+            try:
+                retry_after = float(resp.headers.get("Retry-After", 0))
+                wait = min(retry_after, _RETRY_AFTER_MAX) if retry_after > 0 else backoff_base * (2 ** attempt)
+            except (ValueError, TypeError):
+                wait = backoff_base * (2 ** attempt)
+            log.warning(
+                "Rate limited (429) on %s — waiting %.1fs (retry %d/%d)",
+                _log_url, wait, attempt + 1, max_retries,
+            )
+            time.sleep(wait)
+            continue
+
+        if resp.status_code >= 500 and attempt < max_retries:
+            wait = backoff_base * (2 ** attempt)
+            log.warning(
+                "Server error %d on %s (attempt %d/%d) — retrying in %.1fs",
+                resp.status_code, _log_url, attempt + 1, max_retries + 1, wait,
+            )
+            time.sleep(wait)
+            continue
+
+        # Raise explicitly on unexpected redirects — prevents silent 3xx pass-through
+        # when allow_redirects=False is in effect.
+        if 300 <= resp.status_code < 400:
+            location = _sanitize_for_log(resp.headers.get("Location", "?"))
+            raise requests.exceptions.TooManyRedirects(
+                f"Redirect ({resp.status_code}) blocked on {_log_url} — "
+                f"allow_redirects is False. Location: {location!r}"
+            )
+
+        return resp
+
+    raise RuntimeError("_http retry loop exhausted unexpectedly")
+
+
+# ── GraphQL helper ────────────────────────────────────────────────────────────
+def _gql(query: str, key_id: str, key_secret: str, variables: Optional[dict] = None) -> dict:
+    payload: dict = {"query": query}
+    if variables is not None:
+        payload["variables"] = variables
+    resp = _http(
+        "POST",
+        MC_GRAPHQL_URL,
+        json=payload,
+        headers={
+            "x-mcd-id":     key_id,
+            "x-mcd-token":  key_secret,
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+        verify=True,
+        max_retries=0,  # retry responsibility delegated to tenacity at the push layer
+    )
+    resp.raise_for_status()
+    if len(resp.content) > _MAX_RESPONSE_BYTES:
+        raise RuntimeError(
+            f"MC GraphQL response body is too large ({len(resp.content):,} bytes > "
+            f"{_MAX_RESPONSE_BYTES:,} byte limit). Refusing to parse."
+        )
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        log.debug("MC GraphQL non-JSON response body: %s", _sanitize_for_log(resp.text, max_len=500))
+        raise RuntimeError(
+            f"MC GraphQL returned non-JSON response (status={resp.status_code}). "
+            "Enable DEBUG logging for the response body."
+        ) from exc
+    if "errors" in body:
+        msgs = [_sanitize_for_log(e.get("message", str(e))) for e in body["errors"]]
+        hint = (
+            " (source node does not exist in MC catalog — "
+            "register it via Push Ingest API before linking)"
+            if any("not found" in m.lower() for m in msgs)
+            else " (verify MCD_ID/MCD_TOKEN are a Personal API key, not an Ingestion key)"
+        )
+        raise MCGraphQLError(f"MC GraphQL error: {'; '.join(msgs)}.{hint}")
+    data = body.get("data")
+    if data is None:
+        raise MCGraphQLError(
+            f"MC GraphQL returned null/missing 'data' field (status={resp.status_code}). "
+            "This may indicate a gateway-level error."
+        )
+    return data
+
+
+# ── Step 1: Salesforce OAuth ──────────────────────────────────────────────────
+def get_sf_token(instance_url: str, client_id: str, client_secret: str) -> str:
+    t0 = time.monotonic()
+    log.info("Step 1: Authenticating with Salesforce (%s)", instance_url)
+    resp = _http(
+        "POST",
+        f"{instance_url}/services/oauth2/token",
+        data={
+            "grant_type":    "client_credentials",
+            "client_id":     client_id,
+            "client_secret": client_secret,
+        },
+        verify=True,
+        timeout=30,
+        allow_redirects=True,  # Salesforce may 302 on org migrations / MyDomain moves
+    )
+    try:
+        data = resp.json()
+    except ValueError:
+        resp.raise_for_status()
+        raise RuntimeError(
+            f"Salesforce auth returned non-JSON response (status={resp.status_code})"
+        )
+    if "error" in data:
+        raise RuntimeError(
+            f"Salesforce auth failed: {_sanitize_for_log(str(data.get('error')))} — "
+            f"{_sanitize_for_log(str(data.get('error_description', '')))}"
+        )
+    resp.raise_for_status()
+    token = data.get("access_token")
+    if not token:
+        log.debug("Salesforce auth response keys: %s", list(data.keys()))
+        raise RuntimeError(
+            f"Salesforce auth response missing access_token (status={resp.status_code}). "
+            "Enable DEBUG logging to inspect the response body."
+        )
+    log.info("  Authenticated (%.1fs)", time.monotonic() - t0)
+    return token
+
+
+# ── Step 2: Fetch Data Streams ────────────────────────────────────────────────
+def fetch_data_streams(instance_url: str, access_token: str) -> list:
+    """
+    Fetch all Data Streams from the Salesforce Connect REST API.
+    Paginates via nextPageUrl; enforces same-origin validation on each page URL
+    to prevent SSRF via a malicious API response.
+    """
+    t0 = time.monotonic()
+    log.info("Step 2: Fetching Data Streams from Salesforce")
+    streams: list = []
+    url: Optional[str] = f"{instance_url}/services/data/v{SF_API_VERSION}/ssot/data-streams"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    page = 0
+    instance_parsed = urlparse(instance_url)
+
+    while url:
+        page += 1
+        if page > _MAX_PAGES:
+            raise RuntimeError(
+                f"Data Streams pagination safety limit ({_MAX_PAGES} pages) exceeded. "
+                "This likely indicates a Salesforce API bug or a runaway response."
+            )
+
+        resp = _http("GET", url, headers=headers, verify=True, timeout=30, allow_redirects=True)
+        resp.raise_for_status()
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            log.debug("Data Streams API non-JSON response: %s", _sanitize_for_log(resp.text, max_len=500))
+            raise RuntimeError(
+                f"Data Streams API returned non-JSON response (status={resp.status_code}). "
+                "Enable DEBUG logging for the response body."
+            ) from exc
+
+        page_streams = body.get("dataStreams") or []
+        streams.extend(page_streams)
+        log.info("  Page %d: %d stream(s) fetched (%d total)", page, len(page_streams), len(streams))
+
+        next_path = body.get("nextPageUrl")
+        if not next_path:
+            break
+
+        # Construct and validate the next page URL before following it (SSRF guard)
+        next_url = next_path if next_path.startswith("https://") else f"{instance_url}{next_path}"
+        next_parsed = urlparse(next_url)
+        if next_parsed.scheme != "https" or next_parsed.netloc != instance_parsed.netloc:
+            raise RuntimeError(
+                f"Salesforce nextPageUrl has unexpected origin (got: {next_url!r}, "
+                f"expected scheme=https host={instance_parsed.netloc}). Aborting to prevent SSRF."
+            )
+        url = next_url
+
+    log.info("  %d total data stream(s) (%.1fs)", len(streams), time.monotonic() - t0)
+    return streams
+
+
+# ── Step 2b: Fetch connection details (all connector types) ───────────────────
+def fetch_connection_details(
+    instance_url: str,
+    access_token: str,
+    streams: list,
+) -> dict:
+    """
+    For every data stream, attempt to look up its MktDataConnection via the
+    Tooling API to retrieve source connection parameters.
+
+    Lookup path:
+      DataStreamDefinition (Tooling API) → DataConnectorId
+      → MktDataConnection → Metadata.parameters.*
+
+    Returns dict mapping stream_name → connection detail dict. All entries
+    include at minimum:
+        "connector_id":   str,   DataConnectorId (routing key for warehouse maps)
+        "connector_name": str,   MktDataConnection MasterLabel
+        "connector_type": str,   e.g. "SNOWFLAKE", "AwsS3", "SalesforceDotCom"
+        "raw_params":     dict,  all Metadata.parameters as {name: value}
+
+    Additional type-specific fields:
+
+    SNOWFLAKE:
+        "account_url":        str,   "https://HDB68299.us-west-2.snowflakecomputing.com"
+        "account_identifier": str,   "hdb68299.us-west-2" (lowercased, routing key)
+        "warehouse":          str,   Snowflake virtual warehouse name
+        "region":             str,   Snowflake region
+
+    AwsS3:
+        "bucket_name":        str,   e.g. "my-data-bucket"
+        "parent_directory":   str,   e.g. "/" or "data/feeds"
+
+    SalesforceDotCom (native same-org connections):
+        MktDataConnection may not exist — entry omitted for those streams.
+        External linked-org CRM connections will resolve and expose whatever
+        parameters Salesforce stores (typically instanceUrl or orgId).
+
+    Streams for which no MktDataConnection exists (e.g. native CRM connections)
+    are omitted from the result — callers should fall back to their single
+    warehouse UUID env var for those streams.
+    """
+    t0 = time.monotonic()
+    log.info("Step 2b: Fetching connection details for all streams via Tooling API")
+
+    # Validate stream names before embedding in SOQL IN clauses.
+    raw_names = [s.get("name", "") for s in streams if s.get("name")]
+    stream_names = []
+    for n in raw_names:
+        if _SF_DEVELOPER_NAME_RE.fullmatch(n):
+            stream_names.append(n)
+        else:
+            log.warning(
+                "  Stream name %r failed DeveloperName validation — "
+                "excluding from SOQL query (unexpected characters)",
+                _sanitize_for_log(n),
+            )
+    if not stream_names:
+        return {}
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    result: dict = {}
+
+    # Query DataStreamDefinition for all stream names → DataConnectorId.
+    # Batched (_TOOLING_SOQL_BATCH_SIZE per query) to avoid URL length limits at scale.
+    # Each batch paginates via nextRecordsUrl to handle responses truncated at 2000 records.
+    stream_to_connector: dict = {}
+    instance_parsed_tooling = urlparse(instance_url)
+
+    for batch_start in range(0, len(stream_names), _TOOLING_SOQL_BATCH_SIZE):
+        batch = stream_names[batch_start : batch_start + _TOOLING_SOQL_BATCH_SIZE]
+        names_in = ", ".join(f"'{n}'" for n in batch)
+        soql_query = (
+            "SELECT DeveloperName, DataConnectorId, DataConnectorType "
+            f"FROM DataStreamDefinition WHERE DeveloperName IN ({names_in})"
+        )
+        tooling_url: Optional[str] = (
+            f"{instance_url}/services/data/v{SF_API_VERSION}/tooling/query/"
+        )
+        tooling_params: Optional[dict] = {"q": soql_query}
+        soql_page = 0
+
+        while tooling_url:
+            soql_page += 1
+            if soql_page > _MAX_PAGES:
+                raise RuntimeError(
+                    f"DataStreamDefinition SOQL pagination safety limit "
+                    f"({_MAX_PAGES} pages) exceeded."
+                )
+            resp = _http(
+                "GET",
+                tooling_url,
+                params=tooling_params,
+                headers=headers,
+                verify=True,
+                timeout=30,
+                allow_redirects=True,
+            )
+            resp.raise_for_status()
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    "DataStreamDefinition tooling query returned non-JSON response"
+                ) from exc
+
+            for rec in (body.get("records") or []):
+                name         = rec.get("DeveloperName") or ""
+                connector_id = rec.get("DataConnectorId") or ""
+                conn_type    = rec.get("DataConnectorType") or ""
+                if not (name and connector_id):
+                    continue
+                if not _SF_ID_RE.fullmatch(connector_id):
+                    log.warning(
+                        "  DataConnectorId %r for stream %r failed ID validation — skipping",
+                        _sanitize_for_log(connector_id), _sanitize_for_log(name),
+                    )
+                    continue
+                stream_to_connector[name] = (connector_id, conn_type)
+
+            next_path = body.get("nextRecordsUrl")
+            if body.get("done", True) or not next_path:
+                break
+            # Validate same-origin before following nextRecordsUrl (SSRF guard)
+            next_url = (
+                next_path if next_path.startswith("https://")
+                else f"{instance_url}{next_path}"
+            )
+            next_parsed_t = urlparse(next_url)
+            if (next_parsed_t.scheme != "https"
+                    or next_parsed_t.netloc != instance_parsed_tooling.netloc):
+                raise RuntimeError(
+                    f"DataStreamDefinition nextRecordsUrl has unexpected origin "
+                    f"(got: {next_url!r}, expected host={instance_parsed_tooling.netloc}). "
+                    "Aborting to prevent SSRF."
+                )
+            tooling_url = next_url
+            tooling_params = None  # nextRecordsUrl already encodes query params
+
+    if not stream_to_connector:
+        log.info("  No DataConnectorId found for any streams — connection details unavailable")
+        return {}
+
+    log.info("  Found DataConnectorId for %d/%d stream(s)", len(stream_to_connector), len(stream_names))
+
+    # Fetch MktDataConnection for each unique DataConnectorId
+    unique_ids = {cid for cid, _ in stream_to_connector.values()}
+    connector_details: dict = {}
+
+    for connector_id in unique_ids:
+        r = _http(
+            "GET",
+            f"{instance_url}/services/data/v{SF_API_VERSION}/tooling/sobjects/MktDataConnection/{connector_id}",
+            headers=headers,
+            verify=True,
+            timeout=30,
+            allow_redirects=True,
+        )
+        if r.status_code == 404:
+            # Native same-org connectors (e.g. CRM) don't have a MktDataConnection record
+            log.debug("  MktDataConnection %s not found (likely native connector) — skipping", connector_id)
+            continue
+        r.raise_for_status()
+        try:
+            data = r.json()
+        except ValueError:
+            log.warning("  MktDataConnection %s returned non-JSON — skipping", connector_id)
+            continue
+
+        metadata       = data.get("Metadata") or {}
+        raw_params     = {
+            p["paramName"]: p.get("value", "")
+            for p in (metadata.get("parameters") or [])
+            if p.get("paramName")  # skip malformed entries missing the key name
+        }
+        connector_name = _sanitize_for_log(data.get("MasterLabel", ""))
+        connector_type = _sanitize_for_log(metadata.get("connectorName") or "")
+
+        detail: dict = {
+            "connector_id":   connector_id,
+            "connector_name": connector_name,
+            "connector_type": connector_type,
+            "raw_params":     _redact_params(raw_params),  # never write credentials to disk
+        }
+
+        if connector_type == _CONNECTOR_SNOWFLAKE:
+            account_url_raw = raw_params.get("accountUrl", "")
+            if account_url_raw:
+                # Validate with regex to reject subdomain-bypass attempts
+                # (e.g. host.snowflakecomputing.com.attacker.com.snowflakecomputing.com)
+                if _SNOWFLAKE_ACCT_URL_RE.match(account_url_raw):
+                    _parsed_acct = urlparse(account_url_raw)
+                    hostname = (_parsed_acct.hostname or "").lower()
+                    # Extra guard: hostname must contain snowflakecomputing.com exactly once
+                    if hostname.count("snowflakecomputing.com") == 1:
+                        account_url = _sanitize_for_log(account_url_raw)
+                    else:
+                        log.warning(
+                            "  MktDataConnection %s has suspicious accountUrl %r — ignoring",
+                            connector_id, _sanitize_for_log(account_url_raw),
+                        )
+                        account_url = ""
+                else:
+                    log.warning(
+                        "  MktDataConnection %s has unexpected accountUrl %r — ignoring for routing",
+                        connector_id, _sanitize_for_log(account_url_raw),
+                    )
+                    account_url = ""
+            else:
+                account_url = ""
+            detail["account_url"]        = account_url
+            detail["account_identifier"] = _extract_sf_account_identifier(account_url) if account_url else ""
+            detail["warehouse"]          = _sanitize_for_log(raw_params.get("warehouse", ""))
+            detail["region"]             = _sanitize_for_log(raw_params.get("region", ""))
+            log.debug(
+                "  MktDataConnection %s (%s): account=%s warehouse=%s",
+                connector_id, connector_name,
+                detail["account_identifier"], detail["warehouse"],
+            )
+        else:
+            # Future connector types or external CRM orgs — expose raw_params for routing
+            log.debug(
+                "  MktDataConnection %s (%s type=%s): %d params",
+                connector_id, connector_name, connector_type, len(raw_params),
+            )
+
+        connector_details[connector_id] = detail
+
+    for stream_name, (connector_id, _) in stream_to_connector.items():
+        if connector_id in connector_details:
+            result[stream_name] = connector_details[connector_id]
+
+    log.info(
+        "  Connection details resolved for %d/%d stream(s) (%.1fs)",
+        len(result), len(stream_to_connector), time.monotonic() - t0,
+    )
+    return result
+
+
+# ── Step 3: Fetch MC catalogs ─────────────────────────────────────────────────
+class _CatalogIndex(NamedTuple):
+    """Two-dict index built from a warehouse's MC catalog.
+
+    Separating full-qualified and name-only keys into distinct dicts eliminates
+    any possibility of a collision between the two key types in a shared namespace.
+    """
+    by_full: dict   # {fullTableId.lower() → fullTableId}  — for exact lookups
+    by_name: dict   # {table_name.lower() → fullTableId or list}  — for name-only lookups
+    table_count: int
+
+
+def _fetch_catalog(warehouse_uuid: str, key_id: str, key_secret: str, label: str) -> _CatalogIndex:
+    """
+    Fetch all tables for a warehouse from the MC catalog.
+
+    Returns a _CatalogIndex with two separate lookup dicts:
+      - by_full: keyed by fullTableId.lower() for exact match
+      - by_name: keyed by table name (last segment after final '.'), lowercased
+
+    Both dicts are populated during a single paginated query, scoped to the warehouse UUID
+    to prevent cross-org contamination when multiple warehouses exist in the same MC account.
+
+    Note: for Snowflake warehouses, log a DEBUG sample to confirm the fullTableId format
+    (e.g., "database:schema.table") matches what the Data Stream advancedAttributes provides.
+    """
+    by_full: dict = {}
+    by_name: dict = {}
+    after = None
+    page = 0
+    table_count = 0
+    first_few_logged = False
+
+    while True:
+        page += 1
+        if page > _MAX_PAGES:
+            raise RuntimeError(
+                f"{label} catalog pagination safety limit ({_MAX_PAGES} pages) exceeded."
+            )
+
+        variables: dict = {"dwId": warehouse_uuid}
+        if after:
+            variables["after"] = after
+
+        data = _gql(
+            """
+            query GetAllTables($dwId: UUID, $after: String) {
+              getTables(first: 500, dwId: $dwId, after: $after) {
+                edges { node { fullTableId } }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+            """,
+            key_id,
+            key_secret,
+            variables=variables,
+        )
+
+        result = data.get("getTables") or {}
+        page_fids = []
+        for edge in (result.get("edges") or []):
+            node = edge.get("node") or {}
+            fid = node.get("fullTableId") or ""
+            if not fid:
+                continue
+            by_full[fid.lower()] = fid
+            # Name-only index: last segment after the final '.'
+            if "." in fid:
+                name_only = fid.rsplit(".", 1)[1].lower()
+                if name_only not in by_name:
+                    by_name[name_only] = fid
+                else:
+                    existing = by_name[name_only]
+                    if isinstance(existing, list):
+                        existing.append(fid)
+                    else:
+                        by_name[name_only] = [existing, fid]
+            table_count += 1
+            page_fids.append(fid)
+
+        # Log a sample of raw fullTableId values on the first page at DEBUG level.
+        # This lets operators confirm the key format (e.g. "db:schema.table") matches
+        # what the Data Stream advancedAttributes provides — especially important for Snowflake.
+        if not first_few_logged and page_fids:
+            log.debug("  %s catalog sample fullTableId values: %s", label, page_fids[:5])
+            first_few_logged = True
+
+        log.info("  %s catalog page %d: %d table(s) retrieved so far", label, page, table_count)
+
+        page_info = result.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+        if not after:
+            log.warning(
+                "  %s catalog hasNextPage=true but endCursor is null — "
+                "stopping pagination to avoid infinite loop",
+                label,
+            )
+            break
+
+    return _CatalogIndex(by_full=by_full, by_name=by_name, table_count=table_count)
+
+
+def _lookup(idx: _CatalogIndex, key: str, label: str) -> Optional[str]:
+    """
+    Look up key in the catalog index, case-insensitively.
+    Tries the full-qualified dict first (exact match), then the name-only dict.
+    Returns fullTableId or None.
+    Warns and returns the first entry when a name-only key is ambiguous.
+    """
+    lower = key.lower()
+    # Prefer exact full-qualified match
+    result = idx.by_full.get(lower)
+    if result is not None:
+        return result
+    # Fall back to name-only match
+    entry = idx.by_name.get(lower)
+    if entry is None:
+        return None
+    if isinstance(entry, list):
+        log.warning(
+            "  Ambiguous catalog match for '%s' in %s — multiple tables share this name: %s. "
+            "Using '%s'. Provide the full-qualified key (database:schema.table) to be precise.",
+            key, label, entry, entry[0],
+        )
+        return entry[0]
+    return entry
+
+
+# ── Step 4: Resolve edges from Data Streams ───────────────────────────────────
+def resolve_edges(
+    streams: list,
+    dc_idx: _CatalogIndex,
+    crm_idx: Optional[_CatalogIndex],
+    sf_idx: Optional[_CatalogIndex],
+    dc_warehouse_uuid: str,
+    crm_warehouse_uuid: Optional[str],
+    snowflake_warehouse_uuid: Optional[str],
+    connection_details: Optional[dict] = None,
+    sf_catalogs: Optional[dict] = None,
+    crm_catalogs: Optional[dict] = None,
+) -> tuple:
+    """
+    Match each data stream's source table and DLO to MC catalog entries.
+
+    Returns (edges, skipped) where:
+      edges   — list of edge dicts ready for the GraphQL push
+      skipped — list of dicts with full raw stream data + skip reason for every
+                stream that could not be resolved; saved to disk for future
+                troubleshooting and manual MC asset mapping
+
+    Multi-warehouse Snowflake:
+      sf_catalogs  — {account_identifier: (_CatalogIndex, warehouse_uuid)} built
+                     from MCD_SNOWFLAKE_WAREHOUSE_MAP + connection_details
+      connection_details — {stream_name: {account_url, account_identifier, connector_id, ...}}
+                           from fetch_connection_details(); used to route each
+                           Snowflake or linked-CRM stream to the right catalog entry
+      sf_idx / snowflake_warehouse_uuid — single-warehouse fallback when sf_catalogs
+                                          has no entry for a stream's account
+
+    Multi-org CRM:
+      crm_catalogs — {connector_id: (_CatalogIndex, warehouse_uuid)} built from
+                     MCD_CRM_WAREHOUSE_MAP; keyed by DataConnectorId so each linked
+                     CRM org routes to the correct MC CRM warehouse.
+                     Native same-org streams (no MktDataConnection record) have no
+                     connector_id in connection_details and fall back to crm_idx.
+
+    Edge dict schema:
+      {
+        "source_full_id":   str,   fullTableId of source in MC catalog
+        "source_warehouse": str,   MC warehouse UUID for source system
+        "dest_full_id":     str,   fullTableId of DLO in MC Data Cloud catalog
+        "dest_warehouse":   str,   DC warehouse UUID
+        "connector_type":   str,   SalesforceDotCom | SNOWFLAKE
+        "dlo_name":         str,   raw DLO name from Salesforce
+        "source_label":     str,   human-readable source description for logging
+      }
+
+    Unsupported connector types (AwsS3 and others) are skipped with a warning.
+    AwsS3 sources require custom node creation before edges can be linked — that
+    workflow is intentionally out of scope for this script.
+    """
+    t0 = time.monotonic()
+    log.info("Step 4: Resolving %d data stream(s) to MC catalog entries", len(streams))
+    edges: list = []
+    skipped: list = []           # full raw stream + reason, saved to disk at end
+    skipped_bad_data = 0         # missing required field in API response
+    skipped_missing_uuid = 0     # connector type present but warehouse UUID not configured
+    skipped_unknown_connector = 0
+    skipped_not_in_mc = 0        # table not found in MC catalog after lookup
+
+    _conn_details  = connection_details or {}
+    _sf_catalogs   = sf_catalogs or {}
+    _crm_catalogs  = crm_catalogs or {}
+
+    def _skip(stream: dict, reason: str, detail: str = "") -> None:
+        """Record a skipped stream with full DSO + connection details for troubleshooting."""
+        stream_name_key = stream.get("name", "")
+        stream_name     = _sanitize_for_log(stream_name_key)
+        conn_info       = _conn_details.get(stream_name_key, {})
+        skipped.append({
+            "reason":             reason,
+            "detail":             detail,
+            "connector_type":     _sanitize_for_log(
+                (stream.get("connectorInfo") or {}).get("connectorType", "unknown")
+            ),
+            "dlo_name":           _sanitize_for_log(
+                (stream.get("dataLakeObjectInfo") or {}).get("name", "unknown")
+            ),
+            "connection_details": conn_info,   # Snowflake account URL, warehouse, region
+            "raw_stream":         _sanitize_stream_for_disk(stream),  # credentials redacted
+        })
+
+    for stream in streams:
+        connector_info = stream.get("connectorInfo") or {}
+        connector_type = _sanitize_for_log(connector_info.get("connectorType", ""))
+        dlo_info = stream.get("dataLakeObjectInfo") or {}
+        dlo_name = _sanitize_for_log(dlo_info.get("name", ""))
+
+        if not dlo_name:
+            log.warning(
+                "  Stream (connectorType=%s) has no dataLakeObjectInfo.name — skipping",
+                connector_type,
+            )
+            _skip(stream, "missing_dlo_name")
+            skipped_bad_data += 1
+            continue
+
+        if connector_type not in _SUPPORTED_CONNECTORS:
+            log.warning(
+                "  Unsupported connector type '%s' (DLO=%s) — skipping. "
+                "Supported: %s",
+                connector_type, dlo_name, ", ".join(sorted(_SUPPORTED_CONNECTORS)),
+            )
+            _skip(stream, "unsupported_connector", f"connector_type={connector_type}")
+            skipped_unknown_connector += 1
+            continue
+
+        # Resolve DLO in Data Cloud catalog
+        dlo_full_id = _lookup(dc_idx, dlo_name, "Data Cloud")
+        if not dlo_full_id:
+            log.warning(
+                "  DLO '%s' not found in MC Data Cloud catalog — skipping. "
+                "Trigger a metadata sync in Monte Carlo to pick up this table.",
+                dlo_name,
+            )
+            _skip(stream, "dlo_not_in_mc_catalog", f"dlo_name={dlo_name}")
+            skipped_not_in_mc += 1
+            continue
+
+        # Resolve source table based on connector type
+        if connector_type == _CONNECTOR_SFDC:
+            # Route to the correct MC CRM warehouse.
+            # Priority: crm_catalogs (multi-org map keyed by connector_id) → crm_idx (fallback).
+            # Native same-org CRM streams have no MktDataConnection record, so connector_id
+            # is absent from connection_details; they always fall back to crm_idx.
+            stream_name_crm  = _sanitize_for_log(stream.get("name", ""))
+            conn_info_crm    = _conn_details.get(stream_name_crm, {})
+            connector_id_crm = conn_info_crm.get("connector_id", "")
+            # crm_catalogs keys are lowercased by _parse_warehouse_map; Salesforce IDs
+            # are case-insensitive, so normalise before lookup.
+            connector_id_crm_key = connector_id_crm.lower()
+
+            active_crm_idx: Optional[_CatalogIndex] = None
+            active_crm_uuid: Optional[str] = None
+
+            if connector_id_crm_key and connector_id_crm_key in _crm_catalogs:
+                active_crm_idx, active_crm_uuid = _crm_catalogs[connector_id_crm_key]
+                log.debug(
+                    "  Routed CRM stream '%s' to warehouse %s via connector_id '%s'",
+                    stream_name_crm, active_crm_uuid, connector_id_crm,
+                )
+            elif crm_idx is not None:
+                # If this stream has a resolved connector_id but it's not in the map,
+                # it is a linked external org. Routing it to the native-org fallback
+                # warehouse would silently look in the wrong catalog — skip instead.
+                if connector_id_crm_key and _crm_catalogs:
+                    _safe_conn_id = _sanitize_for_log(connector_id_crm)
+                    log.warning(
+                        "  CRM stream '%s' (connector_id=%s) is a linked-org stream not found "
+                        "in MCD_CRM_WAREHOUSE_MAP — skipping to avoid wrong-warehouse routing. "
+                        "Add '%s=<uuid>' to MCD_CRM_WAREHOUSE_MAP.",
+                        stream_name_crm, _safe_conn_id, _safe_conn_id,
+                    )
+                    _skip(stream, "linked_crm_org_not_in_warehouse_map",
+                          f"connector_id={connector_id_crm} dlo_name={dlo_name}")
+                    skipped_missing_uuid += 1
+                    continue
+                active_crm_idx  = crm_idx
+                active_crm_uuid = crm_warehouse_uuid
+            else:
+                log.warning(
+                    "  CRM stream found (DLO=%s) but no CRM warehouse is configured — skipping. "
+                    "Set MCD_CRM_WAREHOUSE_UUID or MCD_CRM_WAREHOUSE_MAP to enable CRM→DLO lineage.",
+                    dlo_name,
+                )
+                _skip(stream, "crm_warehouse_uuid_not_configured", f"dlo_name={dlo_name}")
+                skipped_missing_uuid += 1
+                continue
+
+            if active_crm_uuid is None:
+                raise RuntimeError(
+                    "Internal invariant violated: active_crm_idx is set but active_crm_uuid is None. "
+                    "This is a bug — please report it."
+                )
+
+            details = connector_info.get("connectorDetails") or {}
+            source_obj = _sanitize_for_log(details.get("sourceObject", ""))
+            if not source_obj:
+                log.warning(
+                    "  CRM stream for DLO=%s has no connectorDetails.sourceObject — skipping",
+                    dlo_name,
+                )
+                _skip(stream, "missing_crm_source_object", f"dlo_name={dlo_name}")
+                skipped_bad_data += 1
+                continue
+            src_full_id = _lookup(active_crm_idx, source_obj, "Salesforce CRM")
+            if not src_full_id:
+                log.warning(
+                    "  CRM table '%s' not found in MC CRM catalog (DLO=%s) — skipping. "
+                    "Confirm the Salesforce CRM connector has synced this object.",
+                    source_obj, dlo_name,
+                )
+                _skip(stream, "source_not_in_mc_catalog",
+                      f"source_object={source_obj} dlo_name={dlo_name}")
+                skipped_not_in_mc += 1
+                continue
+            src_warehouse_uuid = active_crm_uuid
+            source_label = f"CRM:{source_obj}"
+
+        else:  # SNOWFLAKE
+            # Route to the correct MC warehouse using the stream's Snowflake account identifier.
+            # Priority: sf_catalogs (multi-warehouse map) → sf_idx (single-warehouse fallback).
+            stream_name  = _sanitize_for_log(stream.get("name", ""))
+            conn_info    = _conn_details.get(stream_name, {})
+            account_id   = conn_info.get("account_identifier", "")
+            account_url  = conn_info.get("account_url", "")
+
+            active_sf_idx: Optional[_CatalogIndex] = None
+            active_sf_uuid: Optional[str] = None
+
+            if account_id and account_id in _sf_catalogs:
+                active_sf_idx, active_sf_uuid = _sf_catalogs[account_id]
+                log.debug(
+                    "  Routed stream '%s' to warehouse %s via account '%s'",
+                    stream_name, active_sf_uuid, account_id,
+                )
+            elif sf_idx is not None:
+                # Fall back to single-warehouse mode
+                active_sf_idx  = sf_idx
+                active_sf_uuid = snowflake_warehouse_uuid
+                if account_id:
+                    log.warning(
+                        "  Snowflake stream '%s' (account=%s) not in warehouse map — "
+                        "falling back to MCD_SNOWFLAKE_WAREHOUSE_UUID. "
+                        "Add '%s=<uuid>' to MCD_SNOWFLAKE_WAREHOUSE_MAP for precise routing.",
+                        stream_name, account_id, account_id,
+                    )
+            else:
+                if _sf_catalogs and account_id:
+                    log.warning(
+                        "  Snowflake stream '%s' (DLO=%s, account=%s) not in MCD_SNOWFLAKE_WAREHOUSE_MAP "
+                        "and no fallback UUID set. Add '%s=<uuid>' to MCD_SNOWFLAKE_WAREHOUSE_MAP.",
+                        stream_name, dlo_name, account_id, account_id,
+                    )
+                else:
+                    log.warning(
+                        "  Snowflake stream found (DLO=%s, account=%s) but no warehouse is configured. "
+                        "Set MCD_SNOWFLAKE_WAREHOUSE_UUID or MCD_SNOWFLAKE_WAREHOUSE_MAP.",
+                        dlo_name, account_id or "unknown",
+                    )
+                _skip(stream, "snowflake_warehouse_not_configured",
+                      f"dlo_name={dlo_name} account_identifier={account_id} account_url={account_url}")
+                skipped_missing_uuid += 1
+                continue
+
+            if active_sf_uuid is None:
+                log.warning(
+                    "  Snowflake stream '%s' (DLO=%s): warehouse catalog resolved but "
+                    "warehouse UUID is None — skipping. "
+                    "Verify MCD_SNOWFLAKE_WAREHOUSE_UUID is set.",
+                    stream_name, dlo_name,
+                )
+                _skip(stream, "snowflake_warehouse_uuid_none",
+                      f"dlo_name={dlo_name} account_identifier={account_id}")
+                skipped_missing_uuid += 1
+                continue
+
+            attrs = stream.get("advancedAttributes") or {}
+            sf_db     = _sanitize_for_log(attrs.get("database", "")).lower()
+            sf_schema = _sanitize_for_log(attrs.get("schema", "")).lower()
+            sf_obj    = _sanitize_for_log(attrs.get("object", "")).lower()
+            if not sf_obj:
+                log.warning(
+                    "  Snowflake stream for DLO=%s has no advancedAttributes.object — skipping",
+                    dlo_name,
+                )
+                _skip(stream, "missing_snowflake_object",
+                      f"dlo_name={dlo_name} advancedAttributes={str(_redact_params(dict(attrs)))[:500]}")
+                skipped_bad_data += 1
+                continue
+            # Try full-qualified key first (most specific), then object name only (fallback).
+            sf_key_full = f"{sf_db}:{sf_schema}.{sf_obj}" if sf_db and sf_schema else None
+            src_full_id = None
+            if sf_key_full:
+                src_full_id = _lookup(active_sf_idx, sf_key_full, "Snowflake")
+            if src_full_id is None:
+                src_full_id = _lookup(active_sf_idx, sf_obj, "Snowflake")
+                if src_full_id is not None:
+                    log.warning(
+                        "  Snowflake full-qualified key '%s' not found in catalog; "
+                        "matched by table name only ('%s'). "
+                        "Run with LOG_LEVEL=DEBUG to verify the fullTableId format.",
+                        sf_key_full or sf_obj, sf_obj,
+                    )
+            if not src_full_id:
+                log.warning(
+                    "  Snowflake table '%s.%s.%s' not found in MC catalog (DLO=%s, account=%s) — skipping. "
+                    "Run with LOG_LEVEL=DEBUG to inspect catalog fullTableId format.",
+                    sf_db.upper(), sf_schema.upper(), sf_obj.upper(), dlo_name,
+                    account_id or "unknown",
+                )
+                _skip(stream, "source_not_in_mc_catalog",
+                      f"sf_key={sf_key_full} dlo_name={dlo_name} "
+                      f"account_identifier={account_id} "
+                      f"advancedAttributes={str(_redact_params(dict(attrs)))[:500]}")
+                skipped_not_in_mc += 1
+                continue
+            src_warehouse_uuid = active_sf_uuid
+            source_label = f"Snowflake:{sf_db.upper()}.{sf_schema.upper()}.{sf_obj.upper()}"
+
+        edges.append({
+            "source_full_id":   src_full_id,
+            "source_warehouse": src_warehouse_uuid,
+            "dest_full_id":     dlo_full_id,
+            "dest_warehouse":   dc_warehouse_uuid,
+            "connector_type":   connector_type,
+            "dlo_name":         dlo_name,
+            "source_label":     source_label,
+        })
+        log.debug("  Resolved: %s → %s", source_label, dlo_name)
+
+    log.info(
+        "  %d edge(s) resolved; %d skipped (not in MC catalog); "
+        "%d skipped (warehouse UUID not configured); "
+        "%d skipped (unsupported connector); %d skipped (bad API data) (%.1fs)",
+        len(edges), skipped_not_in_mc, skipped_missing_uuid,
+        skipped_unknown_connector, skipped_bad_data,
+        time.monotonic() - t0,
+    )
+    return edges, skipped
+
+
+# ── Failed-edge persistence ───────────────────────────────────────────────────
+def _save_failed_edges(run_id: str, edges: list) -> str:
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(__file__).parent / f"failed_edges_external_{run_id}_{ts}.json"
+    content = json.dumps(edges, indent=2).encode()
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        written = os.write(fd, content)
+        if written != len(content):
+            raise OSError(f"Partial write: wrote {written}/{len(content)} bytes")
+    except BaseException:
+        os.close(fd)
+        path.unlink(missing_ok=True)  # don't leave a zero-byte file that blocks retry
+        raise
+    else:
+        os.close(fd)
+    log.info("  Failed edges saved to: %s", path.resolve())
+    return str(path)
+
+
+def _save_skipped_streams(run_id: str, skipped: list) -> str:
+    """
+    Save full raw DSO data for every stream that could not be resolved to an MC
+    lineage edge.  Each entry includes:
+      - reason          why it was skipped (e.g. "source_not_in_mc_catalog")
+      - detail          human-readable detail string
+      - connector_type  Salesforce connector type string
+      - dlo_name        the DLO the stream feeds
+      - raw_stream      complete API response object — includes connectorInfo,
+                        advancedAttributes, dataLakeObjectInfo etc.  Use this to
+                        manually identify the MC asset and create the edge later,
+                        or to diagnose why the lookup failed.
+    """
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(__file__).parent / f"skipped_streams_{run_id}_{ts}.json"
+    payload = {
+        "run_id":        run_id,
+        "timestamp_utc": ts,
+        "skipped_count": len(skipped),
+        "streams":       skipped,
+    }
+    content = json.dumps(payload, indent=2, default=str).encode()
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        written = os.write(fd, content)
+        if written != len(content):
+            raise OSError(f"Partial write: wrote {written}/{len(content)} bytes")
+    except BaseException:
+        os.close(fd)
+        path.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(fd)
+    return str(path.resolve())
+
+
+# ── Discovery mode ────────────────────────────────────────────────────────────
+def _run_discover(streams: list, run_id: str, instance_url: str) -> None:
+    """
+    Group all data streams by connector type and print a summary table.
+    Saves raw connection field samples to discover_{run_id}_{ts}.json.
+    Does not touch the MC catalog or push any lineage.
+    """
+    t0 = time.monotonic()
+    log.info("=== Discovery Mode — scanning %d stream(s) ===", len(streams))
+
+    groups: dict = {}
+    for stream in streams:
+        ct = (stream.get("connectorInfo") or {}).get("connectorType", "(unknown)")
+        if ct not in groups:
+            groups[ct] = []
+        groups[ct].append(stream)
+
+    report_types: dict = {}
+    for ct, group_streams in sorted(groups.items()):
+        sample = group_streams[0]
+        # Redact connectorDetails and advancedAttributes — may contain credentials.
+        # isinstance guards handle unexpected non-dict values from the API without crashing.
+        _sample_conn_info = dict(sample.get("connectorInfo") or {})
+        if "connectorDetails" in _sample_conn_info:
+            cd = _sample_conn_info.get("connectorDetails")
+            _sample_conn_info["connectorDetails"] = _redact_params(cd if isinstance(cd, dict) else {})
+        _sample_aa = sample.get("advancedAttributes")
+        report_types[ct] = {
+            "count":                  len(group_streams),
+            "supported_for_lineage":  ct in _SUPPORTED_CONNECTORS,
+            "dlo_names": [
+                _sanitize_for_log(
+                    (s.get("dataLakeObjectInfo") or {}).get("name", "(unknown)")
+                )
+                for s in group_streams
+            ],
+            "sample_connector_info":        _sample_conn_info,
+            "sample_advanced_attributes":   _redact_params(_sample_aa if isinstance(_sample_aa, dict) else {}),
+            "sample_dlo_info":              sample.get("dataLakeObjectInfo") or {},
+        }
+
+    log.info("  %-32s  %5s  %s", "Connector Type", "Count", "Lineage Support")
+    log.info("  %s", "-" * 62)
+    for ct, info in sorted(report_types.items()):
+        if ct == _CONNECTOR_SFDC:
+            support = "Yes — CRM → DLO"
+        elif ct == _CONNECTOR_SNOWFLAKE:
+            support = "Yes — Snowflake → DLO"
+        else:
+            support = "No — not supported"
+        log.info("  %-32s  %5d  %s", ct, info["count"], support)
+    log.info("  Total: %d stream(s) across %d connector type(s)", len(streams), len(report_types))
+
+    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = Path(__file__).parent / f"discover_{run_id}_{ts}.json"
+    payload = {
+        "run_id":         run_id,
+        "timestamp_utc":  ts,
+        "instance_url":   instance_url,
+        "total_streams":  len(streams),
+        "connector_types": report_types,
+    }
+    content = json.dumps(payload, indent=2, default=str).encode()
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        written = os.write(fd, content)
+        if written != len(content):
+            raise OSError(f"Partial write: wrote {written}/{len(content)} bytes")
+    except BaseException:
+        os.close(fd)
+        path.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(fd)
+
+    log.info(
+        "  Full connection field samples saved to: %s (%.1fs)",
+        path.resolve(), time.monotonic() - t0,
+    )
+
+
+# ── Step 4: GraphQL mutations ─────────────────────────────────────────────────
+_CREATE_EDGE_MUTATION = """
+mutation CreateEdge($source: NodeInput!, $destination: NodeInput!) {
+  createOrUpdateLineageEdge(source: $source, destination: $destination) {
+    edge {
+      source { mcon objectType }
+      destination { mcon objectType }
+    }
+  }
+}
+"""
+
+
+def _is_push_retryable(exc: BaseException) -> bool:
+    # GraphQL application errors (MCGraphQLError) are permanent — never retry.
+    if isinstance(exc, MCGraphQLError):
+        return False
+    # Suppress retry on HTTP 4xx (won't resolve on retry).
+    resp = getattr(exc, "response", None)
+    if resp is not None and 400 <= resp.status_code < 500:
+        return False
+    return True
+
+
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=60),
+    retry=retry_if_exception(_is_push_retryable),
+    reraise=True,
+)
+def _push_one_edge(
+    source_node: dict,
+    dest_node: dict,
+    key_id: str,
+    key_secret: str,
+) -> dict:
+    return _gql(
+        _CREATE_EDGE_MUTATION,
+        key_id,
+        key_secret,
+        variables={"source": source_node, "destination": dest_node},
+    )
+
+
+def push_edges(
+    edges: list,
+    key_id: str,
+    key_secret: str,
+    run_id: str,
+    shutdown_flag: Optional[threading.Event] = None,
+) -> int:
+    """
+    Push all resolved edges one at a time via createOrUpdateLineageEdge mutation.
+    The mutation is idempotent — re-running is safe.
+    Returns count of successfully pushed edges.
+    Saves any failed edges to a local JSON file for retry.
+    Stops cleanly if shutdown_flag is set (SIGTERM).
+    """
+    t0 = time.monotonic()
+    log.info("Step 5: Pushing %d edge(s) via GraphQL mutation", len(edges))
+    pushed = 0
+    failures: list = []
+
+    for i, edge in enumerate(edges, 1):
+        if shutdown_flag is not None and shutdown_flag.is_set():
+            log.warning(
+                "SIGTERM received — stopping push after %d/%d edges. "
+                "Partial results have been written to Monte Carlo. Re-run is safe (idempotent).",
+                i - 1, len(edges),
+            )
+            break
+        source_node = {
+            "objectType": "TABLE",
+            "objectId":   edge["source_full_id"],
+            "resourceId": edge["source_warehouse"],
+        }
+        dest_node = {
+            "objectType": "TABLE",
+            "objectId":   edge["dest_full_id"],
+            "resourceId": edge["dest_warehouse"],
+        }
+        try:
+            result = _push_one_edge(source_node, dest_node, key_id, key_secret)
+            pushed += 1
+            edge_result = (result.get("createOrUpdateLineageEdge") or {}).get("edge") or {}
+            src_mcon = (edge_result.get("source") or {}).get("mcon", "?")
+            dst_mcon = (edge_result.get("destination") or {}).get("mcon", "?")
+            log.info("  [%d/%d] Pushed: %s → %s", i, len(edges), edge["source_label"], edge["dlo_name"])
+            log.debug("    src_mcon=%s  dst_mcon=%s", src_mcon, dst_mcon)
+        except Exception as exc:
+            log.error(
+                "  [%d/%d] Failed to push %s → %s: %s",
+                i, len(edges), edge["source_label"], edge["dlo_name"], exc,
+            )
+            failures.append(edge)
+
+    if failures:
+        try:
+            path = _save_failed_edges(run_id, failures)
+            log.error(
+                "%d edge(s) failed to push. Re-run after addressing errors. "
+                "Failed edges saved to: %s",
+                len(failures), path,
+            )
+        except OSError as exc:
+            summary = [
+                {"connector_type": e["connector_type"], "dlo_name": e["dlo_name"]}
+                for e in failures
+            ]
+            log.error(
+                "%d edge(s) failed to push and the failed-edge file could not be written (%s). "
+                "Failed edges (connector_type, dlo_name): %s",
+                len(failures), exc, json.dumps(summary)[:2000],
+            )
+
+    log.info(
+        "  Push complete: %d succeeded, %d failed (%.1fs)",
+        pushed, len(failures), time.monotonic() - t0,
+    )
+    return pushed
+
+
+# ── Service classes ───────────────────────────────────────────────────────────
+class SalesforceService:
+    def __init__(self, instance_url: str, client_id: str, client_secret: str) -> None:
+        self.instance_url = instance_url
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self._token: str = ""
+
+    def __repr__(self) -> str:
+        return (
+            f"SalesforceService(instance_url={self.instance_url!r}, "
+            f"client_id={self.client_id!r}, client_secret=<redacted>)"
+        )
+
+    def authenticate(self) -> None:
+        self._token = get_sf_token(self.instance_url, self.client_id, self.client_secret)
+        self.client_secret = ""  # drop reference after use
+
+    @property
+    def token(self) -> str:
+        if not self._token:
+            raise RuntimeError("Not authenticated — call authenticate() first.")
+        return self._token
+
+    def fetch_data_streams(self) -> list:
+        return fetch_data_streams(self.instance_url, self.token)
+
+    def fetch_connection_details(self, streams: list) -> dict:
+        return fetch_connection_details(self.instance_url, self.token, streams)
+
+
+class MCLineageService:
+    def __init__(self, key_id: str, key_secret: str) -> None:
+        self.key_id = key_id
+        self.key_secret = key_secret
+
+    def fetch_catalog(self, warehouse_uuid: str, label: str) -> _CatalogIndex:
+        return _fetch_catalog(warehouse_uuid, self.key_id, self.key_secret, label)
+
+    def push_edges(
+        self,
+        edges: list,
+        run_id: str,
+        shutdown_flag: Optional[threading.Event] = None,
+    ) -> int:
+        return push_edges(edges, self.key_id, self.key_secret, run_id, shutdown_flag)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main() -> None:
+    run_id = uuid_module.uuid4().hex[:8]
+    global log
+    log = _setup_logging(run_id)
+
+    parser = argparse.ArgumentParser(
+        description="Push Salesforce Data 360 external source → DLO lineage to Monte Carlo"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Fetch live data and preview edges, but skip the MC push",
+    )
+    parser.add_argument(
+        "--discover",
+        action="store_true",
+        help=(
+            "Scan all Data Streams and print a connector-type summary. "
+            "Saves raw connectorInfo + advancedAttributes samples to "
+            "discover_{run_id}_{ts}.json. Does not fetch the MC catalog or push lineage."
+        ),
+    )
+    args = parser.parse_args()
+
+    _shutdown_requested = threading.Event()
+
+    def _handle_sigterm(signum, frame):  # noqa: ANN001
+        log.warning(
+            "Received SIGTERM — stop requested. "
+            "Push will halt cleanly after the current edge. Re-run is safe (idempotent)."
+        )
+        _shutdown_requested.set()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    mode_tag = " [DISCOVER]" if args.discover else " [DRY RUN]" if args.dry_run else ""
+    log.info(
+        "=== Data 360 External Lineage Push | run_id=%s%s ===",
+        run_id, mode_tag,
+    )
+    t_start = time.monotonic()
+
+    # MC creds — validate at startup (before any Salesforce API calls) so a misconfigured
+    # run fails immediately rather than after expensive data collection.
+    # Skipped in --discover mode which doesn't need MC credentials.
+    if not args.discover:
+        mcd_id    = _require("MCD_ID")
+        mcd_token = _require("MCD_TOKEN")
+        # Accept MCD_RESOURCE_UUID as an alias for MCD_DC_WAREHOUSE_UUID so that
+        # users running both scripts from the same .env only need to set one variable.
+        dc_warehouse_uuid = (
+            os.environ.get("MCD_DC_WAREHOUSE_UUID")
+            or os.environ.get("MCD_RESOURCE_UUID")
+            or ""
+        )
+        if not dc_warehouse_uuid:
+            log.error(
+                "Required environment variable 'MCD_DC_WAREHOUSE_UUID' is not set. "
+                "Also accepted as 'MCD_RESOURCE_UUID' (shared with push_lineage.py). "
+                "Find the UUID in Monte Carlo: Settings → Integrations → your Data Cloud connection."
+            )
+            sys.exit(1)
+        _validate_uuid("MCD_DC_WAREHOUSE_UUID", dc_warehouse_uuid)
+
+        crm_warehouse_uuid       = os.environ.get("MCD_CRM_WAREHOUSE_UUID")
+        crm_warehouse_map_raw    = os.environ.get("MCD_CRM_WAREHOUSE_MAP", "")
+        snowflake_warehouse_uuid = os.environ.get("MCD_SNOWFLAKE_WAREHOUSE_UUID")
+        snowflake_warehouse_map  = os.environ.get("MCD_SNOWFLAKE_WAREHOUSE_MAP", "")
+        if crm_warehouse_uuid:
+            _validate_uuid("MCD_CRM_WAREHOUSE_UUID", crm_warehouse_uuid)
+        if snowflake_warehouse_uuid:
+            _validate_uuid("MCD_SNOWFLAKE_WAREHOUSE_UUID", snowflake_warehouse_uuid)
+
+        crm_warehouse_map: dict = {}
+        if crm_warehouse_map_raw:
+            crm_warehouse_map = _parse_warehouse_map(crm_warehouse_map_raw)
+            for conn_id, wh_uuid in crm_warehouse_map.items():
+                _validate_uuid(f"MCD_CRM_WAREHOUSE_MAP[{conn_id}]", wh_uuid)
+            log.info("  CRM warehouse map: %d connector(s) configured", len(crm_warehouse_map))
+
+        sf_warehouse_map: dict = {}
+        if snowflake_warehouse_map:
+            sf_warehouse_map = _parse_warehouse_map(snowflake_warehouse_map)
+            for acct_id, wh_uuid in sf_warehouse_map.items():
+                _validate_uuid(f"MCD_SNOWFLAKE_WAREHOUSE_MAP[{acct_id}]", wh_uuid)
+            log.info("  Snowflake warehouse map: %d account(s) configured", len(sf_warehouse_map))
+
+    # Salesforce creds — required for all modes including --discover
+    sf_instance_url  = _require("SF_ORG_URL")
+    sf_client_id     = _require("SF_CLIENT_ID")
+    sf_client_secret = _require("SF_CLIENT_SECRET")
+
+    # SSRF guard: SF_ORG_URL must be HTTPS and must not resolve to a private/loopback IP
+    _parsed_url = urlparse(sf_instance_url)
+    if _parsed_url.scheme != "https" or not _parsed_url.hostname or "@" in (_parsed_url.netloc or ""):
+        log.error(
+            "SF_ORG_URL is not a valid HTTPS URL (got: %s). "
+            "Expected format: https://myorg.my.salesforce.com",
+            sf_instance_url,
+        )
+        sys.exit(1)
+    if _parsed_url.path not in ("", "/"):
+        log.error(
+            "SF_ORG_URL must not contain a path component (got: %r). "
+            "Expected format: https://myorg.my.salesforce.com",
+            sf_instance_url,
+        )
+        sys.exit(1)
+    try:
+        _sf_addr = ipaddress.ip_address(_parsed_url.hostname)
+        if (_sf_addr.is_private or _sf_addr.is_loopback or _sf_addr.is_link_local
+                or _sf_addr.is_reserved or _sf_addr.is_multicast):
+            log.error(
+                "SF_ORG_URL hostname is a private/loopback IP (%s) — refusing to connect. "
+                "SF_ORG_URL must be a Salesforce My Domain URL, not an internal address.",
+                _parsed_url.hostname,
+            )
+            sys.exit(1)
+    except ValueError:
+        pass  # hostname is a domain name — IP-based SSRF check not applicable
+
+    sf_svc = SalesforceService(sf_instance_url, sf_client_id, sf_client_secret)
+
+    # Pre-initialize so references outside the try block are always defined
+    streams: list = []
+    edges: list = []
+    skipped: list = []
+
+    try:
+        # Step 1
+        sf_svc.authenticate()
+
+        # Step 2
+        streams = sf_svc.fetch_data_streams()
+
+        # --discover: print connector-type summary and exit; no MC creds needed
+        if args.discover:
+            _run_discover(streams, run_id, sf_instance_url)
+            sys.exit(0)
+
+        if not streams:
+            log.warning("No data streams returned from Salesforce — nothing to push.")
+            sys.exit(0)
+
+        mc_svc = MCLineageService(mcd_id, mcd_token)
+
+        connector_types_present = {
+            (s.get("connectorInfo") or {}).get("connectorType", "") for s in streams
+        }
+        log.info(
+            "  Connector types present in streams: %s",
+            ", ".join(sorted(ct for ct in connector_types_present if ct)) or "none",
+        )
+
+        need_crm = _CONNECTOR_SFDC in connector_types_present
+        need_sf  = _CONNECTOR_SNOWFLAKE in connector_types_present
+
+        # Step 2b: Fetch connection details for all streams via MktDataConnection.
+        # Covers Snowflake (account routing) and any future connector types.
+        # Native same-org CRM connections will not have a MktDataConnection record
+        # and are silently omitted.
+        connection_details: dict = {}
+        try:
+            connection_details = sf_svc.fetch_connection_details(streams)
+        except Exception as exc:
+            if (need_sf and sf_warehouse_map) or (need_crm and crm_warehouse_map):
+                log.error(
+                    "  fetch_connection_details failed (%s). "
+                    "Multi-warehouse routing is disabled — streams will fall back to single-UUID "
+                    "config or be skipped entirely. This may produce incorrect lineage when "
+                    "multiple CRM orgs or Snowflake accounts are in use. "
+                    "Resolve the error above and re-run before pushing to production.",
+                    exc,
+                )
+            else:
+                log.warning(
+                    "  Could not fetch connection details (%s). "
+                    "Snowflake routing uses single-UUID fallback.",
+                    exc,
+                )
+
+        # Step 3: Fetch catalogs for the warehouses we need
+        t3 = time.monotonic()
+        log.info("Step 3: Fetching MC catalog(s)")
+        dc_idx = mc_svc.fetch_catalog(dc_warehouse_uuid, "Data Cloud")
+
+        crm_idx: Optional[_CatalogIndex] = None
+        crm_catalogs_built: dict = {}
+        if need_crm:
+            if crm_warehouse_map:
+                for conn_id, wh_uuid in crm_warehouse_map.items():
+                    label = f"Salesforce CRM(connector={conn_id})"
+                    catalog = mc_svc.fetch_catalog(wh_uuid, label)
+                    crm_catalogs_built[conn_id] = (catalog, wh_uuid)
+            if crm_warehouse_uuid:
+                crm_idx = mc_svc.fetch_catalog(crm_warehouse_uuid, "Salesforce CRM")
+            elif not crm_warehouse_map:
+                log.warning(
+                    "  CRM streams detected but neither MCD_CRM_WAREHOUSE_UUID nor "
+                    "MCD_CRM_WAREHOUSE_MAP is set. CRM→DLO edges will be skipped."
+                )
+
+        # Build sf_catalogs: {account_identifier → (_CatalogIndex, warehouse_uuid)}
+        # Covers all accounts referenced in the warehouse map.
+        sf_idx: Optional[_CatalogIndex] = None
+        sf_catalogs: dict = {}
+        if need_sf:
+            if sf_warehouse_map:
+                for acct_id, wh_uuid in sf_warehouse_map.items():
+                    label = f"Snowflake({acct_id})"
+                    catalog = mc_svc.fetch_catalog(wh_uuid, label)
+                    sf_catalogs[acct_id] = (catalog, wh_uuid)
+            if snowflake_warehouse_uuid and not sf_warehouse_map:
+                # Single-warehouse fallback — also pre-fetch for any unmapped streams
+                sf_idx = mc_svc.fetch_catalog(snowflake_warehouse_uuid, "Snowflake")
+            elif snowflake_warehouse_uuid:
+                # Both map and fallback set — fetch fallback catalog too
+                sf_idx = mc_svc.fetch_catalog(snowflake_warehouse_uuid, "Snowflake (fallback)")
+            elif not sf_warehouse_map:
+                log.warning(
+                    "  Snowflake streams detected but neither MCD_SNOWFLAKE_WAREHOUSE_UUID "
+                    "nor MCD_SNOWFLAKE_WAREHOUSE_MAP is set. Snowflake→DLO edges will be skipped."
+                )
+
+        log.info("  Step 3 complete (%.1fs)", time.monotonic() - t3)
+
+        # Step 4
+        edges, skipped = resolve_edges(
+            streams=streams,
+            dc_idx=dc_idx,
+            crm_idx=crm_idx,
+            sf_idx=sf_idx,
+            dc_warehouse_uuid=dc_warehouse_uuid,
+            crm_warehouse_uuid=crm_warehouse_uuid,
+            snowflake_warehouse_uuid=snowflake_warehouse_uuid,
+            connection_details=connection_details,
+            sf_catalogs=sf_catalogs,
+            crm_catalogs=crm_catalogs_built,
+        )
+
+        # Deduplicate: multiple Data Streams can share the same source→DLO pair
+        seen_pairs: set = set()
+        deduped: list = []
+        for _e in edges:
+            _pair = (_e["source_full_id"], _e["dest_full_id"])
+            if _pair not in seen_pairs:
+                seen_pairs.add(_pair)
+                deduped.append(_e)
+            else:
+                log.debug("  Duplicate edge suppressed: %s → %s", _e["source_label"], _e["dlo_name"])
+        edges = deduped
+
+        # Save full DSO details for every skipped stream so they can be
+        # reviewed, manually linked to MC assets, or used to diagnose mismatches.
+        if skipped:
+            try:
+                skip_path = _save_skipped_streams(run_id, skipped)
+                log.info(
+                    "  %d skipped stream(s) with full DSO details saved to: %s",
+                    len(skipped), skip_path,
+                )
+            except OSError as exc:
+                log.warning(
+                    "  Could not write skipped-streams file (%s). "
+                    "Run with LOG_LEVEL=DEBUG to see raw stream data in the log.",
+                    exc,
+                )
+
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        log.error("Fatal error during data collection: %s", exc)
+        sys.exit(1)
+    except Exception as exc:
+        log.exception("Unexpected error during data collection: %s", exc)
+        sys.exit(2)
+
+    log.info("Resolved edges (%d total):", len(edges))
+    for e in edges:
+        log.info("  [%s] %s → %s", e["connector_type"], e["source_label"], e["dlo_name"])
+
+    if not edges:
+        log.warning(
+            "0 edges ready to push. "
+            "If source or DLO tables are missing from the MC catalog, trigger a metadata sync "
+            "(Settings → Integrations → your connection) then re-run. "
+            "The push is idempotent — re-running is safe once tables appear."
+        )
+        sys.exit(0)
+
+    if args.dry_run:
+        _by_type: dict = {}
+        for _e in edges:
+            _by_type[_e["connector_type"]] = _by_type.get(_e["connector_type"], 0) + 1
+        _breakdown = ", ".join(f"{ct}={n}" for ct, n in sorted(_by_type.items()))
+        log.info(
+            "[dry-run] Would push %d edge(s) (%s); %d stream(s) skipped. "
+            "Elapsed: %.1fs. Run without --dry-run to commit.",
+            len(edges), _breakdown or "none", len(skipped), time.monotonic() - t_start,
+        )
+        sys.exit(0)
+
+    try:
+        pushed_count = mc_svc.push_edges(edges, run_id, _shutdown_requested)
+    except KeyboardInterrupt:
+        log.warning("Interrupted during push — partial results may have been written to Monte Carlo.")
+        sys.exit(1)
+    except Exception as exc:
+        log.exception("Unexpected error during push: %s", exc)
+        sys.exit(2)
+
+    elapsed = time.monotonic() - t_start
+
+    # Exit 1 if every edge failed — treat as a systemic error, not partial success
+    if pushed_count == 0 and len(edges) > 0:
+        log.error(
+            "=== Run failed | run_id=%s | %.1fs | streams=%d | edges_resolved=%d | "
+            "edges_pushed=0 | skipped=%d ===",
+            run_id, elapsed, len(streams), len(edges), len(skipped),
+        )
+        sys.exit(1)
+
+    log.info(
+        "=== Run complete | run_id=%s | %.1fs | streams=%d | edges_resolved=%d | "
+        "edges_pushed=%d | skipped=%d ===",
+        run_id, elapsed, len(streams), len(edges), pushed_count, len(skipped),
+    )
+
+
+if __name__ == "__main__":
+    main()
