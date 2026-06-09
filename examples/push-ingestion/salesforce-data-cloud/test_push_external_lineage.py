@@ -675,6 +675,30 @@ class TestValidateUuid:
             sut._validate_uuid("TEST", "")
 
 
+# ── _parse_full_table_id ──────────────────────────────────────────────────────
+
+class TestParseFullTableId:
+    def test_standard_format(self):
+        assert sut._parse_full_table_id("db:schema.table") == ("db", "schema", "table")
+
+    def test_salesforce_data_cloud(self):
+        assert sut._parse_full_table_id("salesforce-data-cloud:default.Orders__dll") == (
+            "salesforce-data-cloud", "default", "Orders__dll"
+        )
+
+    def test_multiple_dots_takes_last(self):
+        assert sut._parse_full_table_id("db:schema.sub.table") == ("db", "schema.sub", "table")
+
+    def test_no_colon(self):
+        db, schema, name = sut._parse_full_table_id("schema.table")
+        assert name == "table"
+
+    def test_no_dot(self):
+        db, schema, name = sut._parse_full_table_id("db:tablename")
+        assert db == "db"
+        assert name == "tablename"
+
+
 # ── _is_ingest_retryable ──────────────────────────────────────────────────────
 
 class TestIsIngestRetryable:
@@ -683,6 +707,17 @@ class TestIsIngestRetryable:
         resp = MagicMock()
         resp.status_code = 400
         exc.response = resp
+        assert not sut._is_ingest_retryable(exc)
+
+    def test_4xx_ingestion_error_not_retryable(self):
+        """pycarlo wraps HTTPError → IngestionError with no .response; fix checks __cause__."""
+        from pycarlo.features.ingestion.exceptions import IngestionError
+        from requests.exceptions import HTTPError
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        cause = HTTPError("forbidden", response=mock_resp)
+        exc = IngestionError("Lineage ingestion request failed")
+        exc.__cause__ = cause
         assert not sut._is_ingest_retryable(exc)
 
     def test_500_retryable(self):

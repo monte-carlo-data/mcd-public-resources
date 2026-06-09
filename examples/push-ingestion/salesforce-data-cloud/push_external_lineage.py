@@ -1403,7 +1403,10 @@ def _run_discover(streams: list, run_id: str, instance_url: str) -> None:
 # ── Step 5: Push via Ingest API (cross-warehouse) ─────────────────────────────
 
 def _is_ingest_retryable(exc: BaseException) -> bool:
+    # pycarlo wraps HTTPError into IngestionError (no .response); check __cause__ too
     resp = getattr(exc, "response", None)
+    if resp is None and exc.__cause__ is not None:
+        resp = getattr(exc.__cause__, "response", None)
     if resp is not None and 400 <= resp.status_code < 500:
         return False
     return True
