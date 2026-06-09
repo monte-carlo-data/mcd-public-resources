@@ -623,38 +623,40 @@ class TestPushEdges:
             "source_label": f"Snowflake:{src}",
         }
 
-    @patch("push_external_lineage._push_one_edge")
-    def test_all_succeed(self, mock_push):
-        mock_push.return_value = {"createOrUpdateLineageEdge": {"edge": {"source": {"mcon": "m1"}, "destination": {"mcon": "m2"}}}}
+    @patch("push_external_lineage._send_batch")
+    @patch("push_external_lineage.IngestionService")
+    def test_all_succeed(self, mock_svc_cls, mock_send):
+        mock_send.return_value = {"invocation_id": "inv123"}
         edges = [self._make_edge(), self._make_edge(src="src2:s.t2", dst="dst:default.DLO2__dll")]
         count = sut.push_edges(edges, "key_id", "key_secret", "run123")
         assert count == 2
 
-    @patch("push_external_lineage._push_one_edge")
-    def test_failure_counted(self, mock_push, tmp_path, monkeypatch):
+    @patch("push_external_lineage._send_batch")
+    @patch("push_external_lineage.IngestionService")
+    def test_failure_counted(self, mock_svc_cls, mock_send, tmp_path, monkeypatch):
         monkeypatch.setattr(sut, "__file__", str(tmp_path / "push_external_lineage.py"))
-        mock_push.side_effect = RuntimeError("network error")
+        mock_send.side_effect = RuntimeError("network error")
         edges = [self._make_edge()]
         count = sut.push_edges(edges, "key_id", "key_secret", "run123")
         assert count == 0
 
-    @patch("push_external_lineage._push_one_edge")
-    def test_sigterm_stops_cleanly(self, mock_push):
-        mock_push.return_value = {"createOrUpdateLineageEdge": {"edge": {"source": {"mcon": "m"}, "destination": {"mcon": "d"}}}}
+    @patch("push_external_lineage._send_batch")
+    @patch("push_external_lineage.IngestionService")
+    def test_sigterm_stops_cleanly(self, mock_svc_cls, mock_send):
+        mock_send.return_value = {"invocation_id": "inv1"}
         flag = threading.Event()
         edges = [self._make_edge()] * 5
 
-        original_push = sut._push_one_edge
-
         call_count = [0]
-        def stopping_push(*args, **kwargs):
+        def stopping_send(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 2:
                 flag.set()
-            return mock_push.return_value
+            return {"invocation_id": "inv"}
 
-        mock_push.side_effect = stopping_push
-        count = sut.push_edges(edges, "key_id", "key_secret", "run123", shutdown_flag=flag)
+        mock_send.side_effect = stopping_send
+        # batch_size=1 → one batch per edge; flag set after batch 2 → stops before batch 3
+        count = sut.push_edges(edges, "key_id", "key_secret", "run123", batch_size=1, shutdown_flag=flag)
         assert count < 5  # stopped early
 
 
@@ -673,29 +675,26 @@ class TestValidateUuid:
             sut._validate_uuid("TEST", "")
 
 
-# ── _is_push_retryable ────────────────────────────────────────────────────────
+# ── _is_ingest_retryable ──────────────────────────────────────────────────────
 
-class TestIsPushRetryable:
-    def test_mcgraphqlerror_not_retryable(self):
-        assert not sut._is_push_retryable(sut.MCGraphQLError("perm failure"))
-
+class TestIsIngestRetryable:
     def test_4xx_not_retryable(self):
         exc = RuntimeError("bad request")
         resp = MagicMock()
         resp.status_code = 400
         exc.response = resp
-        assert not sut._is_push_retryable(exc)
+        assert not sut._is_ingest_retryable(exc)
 
     def test_500_retryable(self):
         exc = RuntimeError("server error")
         resp = MagicMock()
         resp.status_code = 500
         exc.response = resp
-        assert sut._is_push_retryable(exc)
+        assert sut._is_ingest_retryable(exc)
 
     def test_network_error_retryable(self):
         import requests as req_lib
-        assert sut._is_push_retryable(req_lib.exceptions.ConnectionError("timeout"))
+        assert sut._is_ingest_retryable(req_lib.exceptions.ConnectionError("timeout"))
 
 
 # ── Integration: edge deduplication in main pipeline context ──────────────────

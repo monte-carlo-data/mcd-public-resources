@@ -3,7 +3,7 @@
 Data 360 External Source → DLO Lineage Push
 
 Pushes CRM→DLO and Snowflake→DLO lineage edges into Monte Carlo using the
-createOrUpdateLineageEdge GraphQL mutation so that external source tables
+Push Ingest API cross-warehouse lineage feature so that external source tables
 appear as trusted lineage upstream of Data 360 Data Lake Objects.
 
 Only sources that already exist as first-class objects in a Monte Carlo
@@ -15,7 +15,7 @@ Pipeline:
   2. Fetch all Data Streams from the Salesforce Connect REST API
   3. Fetch MC catalog tables for Data Cloud, CRM, and/or Snowflake warehouses
   4. Match each stream's source table and DLO to MC catalog entries
-  5. Push lineage edges via createOrUpdateLineageEdge GraphQL mutation
+  5. Push lineage edges via Ingest API cross-warehouse lineage
 
 Usage:
   python3 push_external_lineage.py --dry-run
@@ -24,13 +24,10 @@ Usage:
 
 Required env vars (see .env.example):
   SF_ORG_URL, SF_CLIENT_ID, SF_CLIENT_SECRET
-  MCD_ID, MCD_TOKEN              — Personal API key (catalog lookup + lineage push)
-                                   Note: this integration uses a single Personal API key for
-                                   both catalog lookups (getTables) and lineage push
-                                   (createOrUpdateLineageEdge). No separate Ingestion key is
-                                   needed; invocation_ids are a Pandora Ingestion-API concept
-                                   and do not apply to the GraphQL mutation path used here.
-  MCD_DC_WAREHOUSE_UUID          — Monte Carlo Data Cloud warehouse UUID
+  MCD_INGEST_ID, MCD_INGEST_TOKEN — Ingestion key for the push (must be authorized for ALL
+                                    referenced warehouses: Data Cloud + CRM and/or Snowflake)
+  MCD_ID, MCD_TOKEN               — Personal API key for catalog lookup only
+  MCD_DC_WAREHOUSE_UUID           — Monte Carlo Data Cloud warehouse UUID
 
 Optional env vars:
   MCD_CRM_WAREHOUSE_UUID         — MC CRM warehouse UUID (single-org fallback)
@@ -71,6 +68,16 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+
+try:
+    from pycarlo.core import Client, Session
+    from pycarlo.features.ingestion import IngestionService
+    from pycarlo.features.ingestion.models import LineageAssetRef, LineageEvent
+except ImportError as err:
+    import sys as _sys
+    _sys.exit(
+        f"ERROR: pycarlo is not installed. Run: pip install pycarlo>=0.12.478\n  ({err})"
+    )
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
@@ -131,6 +138,11 @@ _SENSITIVE_PARAM_NAMES = frozenset({
     "bearertoken", "bearer_token",
     "oauthtoken", "oauth_token",
 })
+
+# MC resource_type values for cross-warehouse lineage push
+_CRM_RESOURCE_TYPE       = "salesforce"
+_SNOWFLAKE_RESOURCE_TYPE = "snowflake"
+_DC_RESOURCE_TYPE        = "salesforce-data-cloud"
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -334,6 +346,15 @@ def _parse_warehouse_map(raw: str) -> dict:
     return result
 
 
+def _parse_full_table_id(fid: str) -> tuple:
+    """Parse fullTableId 'database:schema.name' → (database, schema, name)."""
+    db, _, rest = fid.partition(":")
+    if not rest:
+        rest, db = db, ""
+    schema, _, name = rest.rpartition(".")
+    return db, schema, name
+
+
 def _http(
     method: str,
     url: str,
@@ -438,8 +459,8 @@ def _gql(query: str, key_id: str, key_secret: str, variables: Optional[dict] = N
     if "errors" in body:
         msgs = [_sanitize_for_log(e.get("message", str(e))) for e in body["errors"]]
         hint = (
-            " (source node does not exist in MC catalog — "
-            "register it via Push Ingest API before linking)"
+            " (warehouse UUID may be wrong or the table doesn't exist in MC — "
+            "verify MCD_DC_WAREHOUSE_UUID/MCD_CRM_WAREHOUSE_UUID/MCD_SNOWFLAKE_WAREHOUSE_UUID)"
             if any("not found" in m.lower() for m in msgs)
             else " (verify MCD_ID/MCD_TOKEN are a Personal API key, not an Ingestion key)"
         )
@@ -1379,24 +1400,9 @@ def _run_discover(streams: list, run_id: str, instance_url: str) -> None:
     )
 
 
-# ── Step 4: GraphQL mutations ─────────────────────────────────────────────────
-_CREATE_EDGE_MUTATION = """
-mutation CreateEdge($source: NodeInput!, $destination: NodeInput!) {
-  createOrUpdateLineageEdge(source: $source, destination: $destination) {
-    edge {
-      source { mcon objectType }
-      destination { mcon objectType }
-    }
-  }
-}
-"""
+# ── Step 5: Push via Ingest API (cross-warehouse) ─────────────────────────────
 
-
-def _is_push_retryable(exc: BaseException) -> bool:
-    # GraphQL application errors (MCGraphQLError) are permanent — never retry.
-    if isinstance(exc, MCGraphQLError):
-        return False
-    # Suppress retry on HTTP 4xx (won't resolve on retry).
+def _is_ingest_retryable(exc: BaseException) -> bool:
     resp = getattr(exc, "response", None)
     if resp is not None and 400 <= resp.status_code < 500:
         return False
@@ -1406,74 +1412,96 @@ def _is_push_retryable(exc: BaseException) -> bool:
 @retry(
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=2, min=2, max=60),
-    retry=retry_if_exception(_is_push_retryable),
+    retry=retry_if_exception(_is_ingest_retryable),
     reraise=True,
 )
-def _push_one_edge(
-    source_node: dict,
-    dest_node: dict,
-    key_id: str,
-    key_secret: str,
-) -> dict:
-    return _gql(
-        _CREATE_EDGE_MUTATION,
-        key_id,
-        key_secret,
-        variables={"source": source_node, "destination": dest_node},
-    )
+def _send_batch(svc: IngestionService, events: list) -> dict:
+    return svc.send_lineage(events=events)
 
 
 def push_edges(
     edges: list,
-    key_id: str,
-    key_secret: str,
+    ingest_key_id: str,
+    ingest_key_secret: str,
     run_id: str,
+    batch_size: int = 500,
     shutdown_flag: Optional[threading.Event] = None,
 ) -> int:
     """
-    Push all resolved edges one at a time via createOrUpdateLineageEdge mutation.
-    The mutation is idempotent — re-running is safe.
+    Push resolved edges via Ingest API cross-warehouse lineage.
+    Each edge specifies resource_uuid + resource_type per asset — no top-level resource.
+    The push is idempotent — re-running is safe.
     Returns count of successfully pushed edges.
-    Saves any failed edges to a local JSON file for retry.
-    Stops cleanly if shutdown_flag is set (SIGTERM).
     """
     t0 = time.monotonic()
-    log.info("Step 5: Pushing %d edge(s) via GraphQL mutation", len(edges))
+    log.info("Step 5: Pushing %d edge(s) via Ingest API (cross-warehouse)", len(edges))
+
+    svc = IngestionService(mc_client=Client(session=Session(
+        mcd_id=ingest_key_id,
+        mcd_token=ingest_key_secret,
+        scope="Ingestion",
+    )))
+
+    _resource_type_map = {
+        _CONNECTOR_SFDC:      _CRM_RESOURCE_TYPE,
+        _CONNECTOR_SNOWFLAKE: _SNOWFLAKE_RESOURCE_TYPE,
+    }
+
     pushed = 0
     failures: list = []
+    batches = [edges[i:i + batch_size] for i in range(0, len(edges), batch_size)]
+    invocation_ids: list = []
 
-    for i, edge in enumerate(edges, 1):
+    for batch_idx, batch in enumerate(batches, 1):
         if shutdown_flag is not None and shutdown_flag.is_set():
             log.warning(
-                "SIGTERM received — stopping push after %d/%d edges. "
-                "Partial results have been written to Monte Carlo. Re-run is safe (idempotent).",
-                i - 1, len(edges),
+                "SIGTERM received — stopping push after batch %d/%d. "
+                "Partial results written to Monte Carlo. Re-run is safe (idempotent).",
+                batch_idx - 1, len(batches),
             )
             break
-        source_node = {
-            "objectType": "TABLE",
-            "objectId":   edge["source_full_id"],
-            "resourceId": edge["source_warehouse"],
-        }
-        dest_node = {
-            "objectType": "TABLE",
-            "objectId":   edge["dest_full_id"],
-            "resourceId": edge["dest_warehouse"],
-        }
+
+        events = []
+        for e in batch:
+            src_db, src_schema, src_name = _parse_full_table_id(e["source_full_id"])
+            dst_db, dst_schema, dst_name = _parse_full_table_id(e["dest_full_id"])
+            src_resource_type = _resource_type_map.get(
+                e["connector_type"], e["connector_type"].lower()
+            )
+            events.append(LineageEvent(
+                destination=LineageAssetRef(
+                    type="TABLE",
+                    database=dst_db,
+                    schema=dst_schema,
+                    name=dst_name,
+                    resource_uuid=e["dest_warehouse"],
+                    resource_type=_DC_RESOURCE_TYPE,
+                ),
+                sources=[LineageAssetRef(
+                    type="TABLE",
+                    database=src_db,
+                    schema=src_schema,
+                    name=src_name,
+                    resource_uuid=e["source_warehouse"],
+                    resource_type=src_resource_type,
+                )],
+            ))
+
         try:
-            result = _push_one_edge(source_node, dest_node, key_id, key_secret)
-            pushed += 1
-            edge_result = (result.get("createOrUpdateLineageEdge") or {}).get("edge") or {}
-            src_mcon = (edge_result.get("source") or {}).get("mcon", "?")
-            dst_mcon = (edge_result.get("destination") or {}).get("mcon", "?")
-            log.info("  [%d/%d] Pushed: %s → %s", i, len(edges), edge["source_label"], edge["dlo_name"])
-            log.debug("    src_mcon=%s  dst_mcon=%s", src_mcon, dst_mcon)
+            result = _send_batch(svc, events)
+            inv_id = (result or {}).get("invocation_id", "?")
+            invocation_ids.append(inv_id)
+            log.info(
+                "  Batch %d/%d: %d edge(s) pushed — invocation_id=%s",
+                batch_idx, len(batches), len(batch), inv_id,
+            )
+            pushed += len(batch)
         except Exception as exc:
             log.error(
-                "  [%d/%d] Failed to push %s → %s: %s",
-                i, len(edges), edge["source_label"], edge["dlo_name"], exc,
+                "  Batch %d/%d failed (%d edge(s)): %s",
+                batch_idx, len(batches), len(batch), exc,
             )
-            failures.append(edge)
+            failures.extend(batch)
 
     if failures:
         try:
@@ -1489,8 +1517,8 @@ def push_edges(
                 for e in failures
             ]
             log.error(
-                "%d edge(s) failed to push and the failed-edge file could not be written (%s). "
-                "Failed edges (connector_type, dlo_name): %s",
+                "%d edge(s) failed and the failed-edge file could not be written (%s). "
+                "Failed edges: %s",
                 len(failures), exc, json.dumps(summary)[:2000],
             )
 
@@ -1533,9 +1561,17 @@ class SalesforceService:
 
 
 class MCLineageService:
-    def __init__(self, key_id: str, key_secret: str) -> None:
+    def __init__(
+        self,
+        key_id: str,
+        key_secret: str,
+        ingest_key_id: str,
+        ingest_key_secret: str,
+    ) -> None:
         self.key_id = key_id
         self.key_secret = key_secret
+        self.ingest_key_id = ingest_key_id
+        self.ingest_key_secret = ingest_key_secret
 
     def fetch_catalog(self, warehouse_uuid: str, label: str) -> _CatalogIndex:
         return _fetch_catalog(warehouse_uuid, self.key_id, self.key_secret, label)
@@ -1544,9 +1580,12 @@ class MCLineageService:
         self,
         edges: list,
         run_id: str,
+        batch_size: int = 500,
         shutdown_flag: Optional[threading.Event] = None,
     ) -> int:
-        return push_edges(edges, self.key_id, self.key_secret, run_id, shutdown_flag)
+        return push_edges(
+            edges, self.ingest_key_id, self.ingest_key_secret, run_id, batch_size, shutdown_flag
+        )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1597,6 +1636,8 @@ def main() -> None:
     if not args.discover:
         mcd_id    = _require("MCD_ID")
         mcd_token = _require("MCD_TOKEN")
+        mcd_ingest_id    = _require("MCD_INGEST_ID")
+        mcd_ingest_token = _require("MCD_INGEST_TOKEN")
         # Accept MCD_RESOURCE_UUID as an alias for MCD_DC_WAREHOUSE_UUID so that
         # users running both scripts from the same .env only need to set one variable.
         dc_warehouse_uuid = (
@@ -1693,7 +1734,7 @@ def main() -> None:
             log.warning("No data streams returned from Salesforce — nothing to push.")
             sys.exit(0)
 
-        mc_svc = MCLineageService(mcd_id, mcd_token)
+        mc_svc = MCLineageService(mcd_id, mcd_token, mcd_ingest_id, mcd_ingest_token)
 
         connector_types_present = {
             (s.get("connectorInfo") or {}).get("connectorType", "") for s in streams
@@ -1849,8 +1890,9 @@ def main() -> None:
         )
         sys.exit(0)
 
+    _batch_size = int(os.environ.get("INGEST_BATCH_SIZE", "500"))
     try:
-        pushed_count = mc_svc.push_edges(edges, run_id, _shutdown_requested)
+        pushed_count = mc_svc.push_edges(edges, run_id, _batch_size, _shutdown_requested)
     except KeyboardInterrupt:
         log.warning("Interrupted during push — partial results may have been written to Monte Carlo.")
         sys.exit(1)
