@@ -26,25 +26,25 @@ Required env vars (see .env.example):
   SF_ORG_URL, SF_CLIENT_ID, SF_CLIENT_SECRET
   MCD_INGEST_ID, MCD_INGEST_TOKEN — Ingestion key for the push (must be authorized for ALL
                                     referenced warehouses: Data Cloud + CRM and/or Snowflake)
-  MCD_ID, MCD_TOKEN               — Personal API key for catalog lookup only
-  MCD_DC_WAREHOUSE_UUID           — Monte Carlo Data Cloud warehouse UUID
+  MCD_ID, MCD_TOKEN               — Personal API key for catalog lookup and warehouse discovery
 
-Optional env vars:
-  MCD_CRM_WAREHOUSE_UUID         — MC CRM warehouse UUID (single-org fallback)
+Warehouse UUIDs are auto-discovered from Monte Carlo using the Salesforce org domain and
+Snowflake account identifiers. No manual UUID configuration is needed for most deployments.
+
+Optional env var overrides (rarely needed):
+  MCD_DC_WAREHOUSE_UUID / MCD_RESOURCE_UUID — Override auto-discovered Data Cloud warehouse UUID
+  MCD_CRM_WAREHOUSE_UUID         — Override auto-discovered CRM warehouse UUID
   MCD_CRM_WAREHOUSE_MAP          — Multi-org CRM map: "connector_id1=uuid1,connector_id2=uuid2"
-                                   connector_id is the DataConnectorId from DataStreamDefinition.
-                                   Used for linked/external CRM org streams; native same-org
-                                   streams fall back to MCD_CRM_WAREHOUSE_UUID.
-                                   Takes precedence over MCD_CRM_WAREHOUSE_UUID when set.
-  MCD_SNOWFLAKE_WAREHOUSE_UUID   — MC Snowflake warehouse UUID (single-warehouse fallback)
+                                   Only needed when multiple CRM orgs feed the same Data Cloud org.
+  MCD_SNOWFLAKE_WAREHOUSE_UUID   — Override auto-discovered Snowflake warehouse UUID
   MCD_SNOWFLAKE_WAREHOUSE_MAP    — Multi-warehouse map: "account_id=uuid,account_id2=uuid2"
-                                   account_id is the Snowflake account identifier extracted from
-                                   the accountUrl in MktDataConnection (e.g. "hdb68299.us-west-2")
-                                   Takes precedence over MCD_SNOWFLAKE_WAREHOUSE_UUID when set.
+                                   Only needed when multiple Snowflake accounts are in use and
+                                   auto-discovery picks the wrong one.
   LOG_LEVEL                      — DEBUG/INFO/WARNING/ERROR (default: INFO)
   LOG_FORMAT                     — json for structured output (default: plain)
 """
 import argparse
+import concurrent.futures
 import ipaddress
 import json
 import logging
@@ -96,6 +96,10 @@ _MAX_PAGES = 500
 # from a malicious or misconfigured server sending a very large response body.
 _MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50 MB
 
+# Warn if getWarehouses returns more than this many entries — suggests the account may have
+# more connections than a single unparameterised query can return.
+_MAX_WAREHOUSES_DISCOVERY = 200
+
 # Batch size for SOQL IN clauses — keeps each query well under URL and record-count limits.
 # Salesforce Tooling API returns at most 2000 records per response; batching at 200 keeps
 # each batch comfortably under that limit and avoids URL length errors at scale.
@@ -140,7 +144,7 @@ _SENSITIVE_PARAM_NAMES = frozenset({
 })
 
 # MC resource_type values for cross-warehouse lineage push
-_CRM_RESOURCE_TYPE       = "salesforce"
+_CRM_RESOURCE_TYPE       = "salesforce-crm"
 _SNOWFLAKE_RESOURCE_TYPE = "snowflake"
 _DC_RESOURCE_TYPE        = "salesforce-data-cloud"
 
@@ -297,6 +301,17 @@ def _validate_uuid(name: str, value: str) -> None:
         sys.exit(1)
 
 
+def _parse_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        val = int(raw)
+        if val < 1:
+            raise ValueError("must be >= 1")
+        return val
+    except ValueError as exc:
+        sys.exit(f"Invalid {name}={raw!r}: {exc}")
+
+
 def _extract_sf_account_identifier(account_url: str) -> str:
     """Extract lowercased account identifier from a Snowflake accountUrl.
 
@@ -419,6 +434,13 @@ def _http(
                 f"allow_redirects is False. Location: {location!r}"
             )
 
+        if len(resp.content) > _MAX_RESPONSE_BYTES:
+            raise RuntimeError(
+                f"Response body from {_log_url} is too large "
+                f"({len(resp.content):,} bytes > {_MAX_RESPONSE_BYTES:,} byte limit). "
+                "Refusing to parse."
+            )
+
         return resp
 
     raise RuntimeError("_http retry loop exhausted unexpectedly")
@@ -443,11 +465,6 @@ def _gql(query: str, key_id: str, key_secret: str, variables: Optional[dict] = N
         max_retries=0,  # retry responsibility delegated to tenacity at the push layer
     )
     resp.raise_for_status()
-    if len(resp.content) > _MAX_RESPONSE_BYTES:
-        raise RuntimeError(
-            f"MC GraphQL response body is too large ({len(resp.content):,} bytes > "
-            f"{_MAX_RESPONSE_BYTES:,} byte limit). Refusing to parse."
-        )
     try:
         body = resp.json()
     except ValueError as exc:
@@ -478,9 +495,12 @@ def _gql(query: str, key_id: str, key_secret: str, variables: Optional[dict] = N
 def get_sf_token(instance_url: str, client_id: str, client_secret: str) -> str:
     t0 = time.monotonic()
     log.info("Step 1: Authenticating with Salesforce (%s)", instance_url)
-    resp = _http(
-        "POST",
-        f"{instance_url}/services/oauth2/token",
+    token_url = f"{instance_url}/services/oauth2/token"
+    instance_host = (urlparse(instance_url).hostname or "").lower()
+    # Use allow_redirects=False so we can validate redirect destinations before following.
+    # We bypass _http here to intercept the raw 3xx response; the redirect GET goes through _http.
+    resp = requests.post(
+        token_url,
         data={
             "grant_type":    "client_credentials",
             "client_id":     client_id,
@@ -488,8 +508,36 @@ def get_sf_token(instance_url: str, client_id: str, client_secret: str) -> str:
         },
         verify=True,
         timeout=30,
-        allow_redirects=True,  # Salesforce may 302 on org migrations / MyDomain moves
+        allow_redirects=False,
     )
+    # MyDomain / org migration: 301/302/303 are safe (requests downgrades POST→GET, no body).
+    # 307/308 would re-POST the credentials body to the redirect target — reject them.
+    if 300 <= resp.status_code < 400:
+        if resp.status_code in (307, 308):
+            raise RuntimeError(
+                f"Salesforce OAuth returned {resp.status_code} — this redirect type preserves "
+                "the POST body, which would exfiltrate client_secret to the redirect target. "
+                "Update SF_ORG_URL to match your org's current MyDomain URL and re-run."
+            )
+        location = resp.headers.get("Location", "")
+        if not location:
+            raise RuntimeError(
+                f"Salesforce OAuth {resp.status_code} redirect has no Location header"
+            )
+        loc_parsed = urlparse(location)
+        # Compare hostname (not netloc) so an explicit :443 suffix doesn't cause a false-positive
+        if loc_parsed.scheme != "https" or (loc_parsed.hostname or "").lower() != instance_host.lower():
+            raise RuntimeError(
+                f"Salesforce OAuth redirect crosses origins "
+                f"(expected {instance_host!r}, got {loc_parsed.hostname!r}). "
+                "Update SF_ORG_URL to the correct MyDomain URL and re-run."
+            )
+        resp = _http("GET", location, verify=True, timeout=30)
+    if len(resp.content) > _MAX_RESPONSE_BYTES:
+        raise RuntimeError(
+            f"Salesforce OAuth response body too large "
+            f"({len(resp.content):,} bytes > {_MAX_RESPONSE_BYTES:,} byte limit)"
+        )
     try:
         data = resp.json()
     except ValueError:
@@ -537,7 +585,7 @@ def fetch_data_streams(instance_url: str, access_token: str) -> list:
                 "This likely indicates a Salesforce API bug or a runaway response."
             )
 
-        resp = _http("GET", url, headers=headers, verify=True, timeout=30, allow_redirects=True)
+        resp = _http("GET", url, headers=headers, verify=True, timeout=30)
         resp.raise_for_status()
         try:
             body = resp.json()
@@ -559,10 +607,10 @@ def fetch_data_streams(instance_url: str, access_token: str) -> list:
         # Construct and validate the next page URL before following it (SSRF guard)
         next_url = next_path if next_path.startswith("https://") else f"{instance_url}{next_path}"
         next_parsed = urlparse(next_url)
-        if next_parsed.scheme != "https" or next_parsed.netloc != instance_parsed.netloc:
+        if next_parsed.scheme != "https" or (next_parsed.hostname or "").lower() != (instance_parsed.hostname or "").lower():
             raise RuntimeError(
                 f"Salesforce nextPageUrl has unexpected origin (got: {next_url!r}, "
-                f"expected scheme=https host={instance_parsed.netloc}). Aborting to prevent SSRF."
+                f"expected scheme=https host={instance_parsed.hostname}). Aborting to prevent SSRF."
             )
         url = next_url
 
@@ -666,7 +714,6 @@ def fetch_connection_details(
                 headers=headers,
                 verify=True,
                 timeout=30,
-                allow_redirects=True,
             )
             resp.raise_for_status()
             try:
@@ -700,10 +747,10 @@ def fetch_connection_details(
             )
             next_parsed_t = urlparse(next_url)
             if (next_parsed_t.scheme != "https"
-                    or next_parsed_t.netloc != instance_parsed_tooling.netloc):
+                    or (next_parsed_t.hostname or "").lower() != (instance_parsed_tooling.hostname or "").lower()):
                 raise RuntimeError(
                     f"DataStreamDefinition nextRecordsUrl has unexpected origin "
-                    f"(got: {next_url!r}, expected host={instance_parsed_tooling.netloc}). "
+                    f"(got: {next_url!r}, expected host={instance_parsed_tooling.hostname}). "
                     "Aborting to prevent SSRF."
                 )
             tooling_url = next_url
@@ -715,35 +762,35 @@ def fetch_connection_details(
 
     log.info("  Found DataConnectorId for %d/%d stream(s)", len(stream_to_connector), len(stream_names))
 
-    # Fetch MktDataConnection for each unique DataConnectorId
+    # Fetch MktDataConnection for each unique DataConnectorId — in parallel to avoid
+    # O(n) sequential round-trips on orgs with many connectors.
     unique_ids = {cid for cid, _ in stream_to_connector.values()}
     connector_details: dict = {}
 
-    for connector_id in unique_ids:
+    def _fetch_one_connection(connector_id: str) -> Optional[dict]:
+        """Return parsed detail dict or None if the record should be skipped."""
         r = _http(
             "GET",
             f"{instance_url}/services/data/v{SF_API_VERSION}/tooling/sobjects/MktDataConnection/{connector_id}",
             headers=headers,
             verify=True,
             timeout=30,
-            allow_redirects=True,
         )
         if r.status_code == 404:
-            # Native same-org connectors (e.g. CRM) don't have a MktDataConnection record
             log.debug("  MktDataConnection %s not found (likely native connector) — skipping", connector_id)
-            continue
+            return None
         r.raise_for_status()
         try:
             data = r.json()
         except ValueError:
             log.warning("  MktDataConnection %s returned non-JSON — skipping", connector_id)
-            continue
+            return None
 
         metadata       = data.get("Metadata") or {}
         raw_params     = {
             p["paramName"]: p.get("value", "")
             for p in (metadata.get("parameters") or [])
-            if p.get("paramName")  # skip malformed entries missing the key name
+            if p.get("paramName")
         }
         connector_name = _sanitize_for_log(data.get("MasterLabel", ""))
         connector_type = _sanitize_for_log(metadata.get("connectorName") or "")
@@ -752,18 +799,15 @@ def fetch_connection_details(
             "connector_id":   connector_id,
             "connector_name": connector_name,
             "connector_type": connector_type,
-            "raw_params":     _redact_params(raw_params),  # never write credentials to disk
+            "raw_params":     _redact_params(raw_params),
         }
 
         if connector_type == _CONNECTOR_SNOWFLAKE:
             account_url_raw = raw_params.get("accountUrl", "")
             if account_url_raw:
-                # Validate with regex to reject subdomain-bypass attempts
-                # (e.g. host.snowflakecomputing.com.attacker.com.snowflakecomputing.com)
                 if _SNOWFLAKE_ACCT_URL_RE.match(account_url_raw):
                     _parsed_acct = urlparse(account_url_raw)
                     hostname = (_parsed_acct.hostname or "").lower()
-                    # Extra guard: hostname must contain snowflakecomputing.com exactly once
                     if hostname.count("snowflakecomputing.com") == 1:
                         account_url = _sanitize_for_log(account_url_raw)
                     else:
@@ -790,13 +834,23 @@ def fetch_connection_details(
                 detail["account_identifier"], detail["warehouse"],
             )
         else:
-            # Future connector types or external CRM orgs — expose raw_params for routing
             log.debug(
                 "  MktDataConnection %s (%s type=%s): %d params",
                 connector_id, connector_name, connector_type, len(raw_params),
             )
+        return detail
 
-        connector_details[connector_id] = detail
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_fetch_one_connection, cid): cid for cid in unique_ids}
+        for future in concurrent.futures.as_completed(futures):
+            cid = futures[future]
+            try:
+                detail = future.result()
+            except Exception as exc:
+                log.warning("  MktDataConnection %s fetch failed: %s — skipping", cid, _sanitize_for_log(str(exc)))
+                detail = None
+            if detail is not None:
+                connector_details[cid] = detail
 
     for stream_name, (connector_id, _) in stream_to_connector.items():
         if connector_id in connector_details:
@@ -1066,8 +1120,8 @@ def resolve_edges(
             # Priority: crm_catalogs (multi-org map keyed by connector_id) → crm_idx (fallback).
             # Native same-org CRM streams have no MktDataConnection record, so connector_id
             # is absent from connection_details; they always fall back to crm_idx.
-            stream_name_crm  = _sanitize_for_log(stream.get("name", ""))
-            conn_info_crm    = _conn_details.get(stream_name_crm, {})
+            stream_name_crm  = _sanitize_for_log(stream.get("name", ""))  # logging only
+            conn_info_crm    = _conn_details.get(stream.get("name", ""), {})
             connector_id_crm = conn_info_crm.get("connector_id", "")
             # crm_catalogs keys are lowercased by _parse_warehouse_map; Salesforce IDs
             # are case-insensitive, so normalise before lookup.
@@ -1102,8 +1156,8 @@ def resolve_edges(
                 active_crm_uuid = crm_warehouse_uuid
             else:
                 log.warning(
-                    "  CRM stream found (DLO=%s) but no CRM warehouse is configured — skipping. "
-                    "Set MCD_CRM_WAREHOUSE_UUID or MCD_CRM_WAREHOUSE_MAP to enable CRM→DLO lineage.",
+                    "  CRM stream found (DLO=%s) but no CRM warehouse was found in MC — skipping. "
+                    "Ensure a Salesforce CRM connection exists in MC for this org.",
                     dlo_name,
                 )
                 _skip(stream, "crm_warehouse_uuid_not_configured", f"dlo_name={dlo_name}")
@@ -1143,8 +1197,8 @@ def resolve_edges(
         else:  # SNOWFLAKE
             # Route to the correct MC warehouse using the stream's Snowflake account identifier.
             # Priority: sf_catalogs (multi-warehouse map) → sf_idx (single-warehouse fallback).
-            stream_name  = _sanitize_for_log(stream.get("name", ""))
-            conn_info    = _conn_details.get(stream_name, {})
+            stream_name  = _sanitize_for_log(stream.get("name", ""))  # logging only
+            conn_info    = _conn_details.get(stream.get("name", ""), {})
             account_id   = conn_info.get("account_identifier", "")
             account_url  = conn_info.get("account_url", "")
 
@@ -1177,9 +1231,9 @@ def resolve_edges(
                     )
                 else:
                     log.warning(
-                        "  Snowflake stream found (DLO=%s, account=%s) but no warehouse is configured. "
-                        "Set MCD_SNOWFLAKE_WAREHOUSE_UUID or MCD_SNOWFLAKE_WAREHOUSE_MAP.",
-                        dlo_name, account_id or "unknown",
+                        "  Snowflake stream found (DLO=%s, account=%s) but no matching MC warehouse was found. "
+                        "Ensure a Snowflake connection exists in MC for account '%s'.",
+                        dlo_name, account_id or "unknown", account_id or "unknown",
                     )
                 _skip(stream, "snowflake_warehouse_not_configured",
                       f"dlo_name={dlo_name} account_identifier={account_id} account_url={account_url}")
@@ -1547,8 +1601,10 @@ class SalesforceService:
         )
 
     def authenticate(self) -> None:
-        self._token = get_sf_token(self.instance_url, self.client_id, self.client_secret)
-        self.client_secret = ""  # drop reference after use
+        try:
+            self._token = get_sf_token(self.instance_url, self.client_id, self.client_secret)
+        finally:
+            self.client_secret = ""  # drop reference regardless of success or failure
 
     @property
     def token(self) -> str:
@@ -1561,6 +1617,107 @@ class SalesforceService:
 
     def fetch_connection_details(self, streams: list) -> dict:
         return fetch_connection_details(self.instance_url, self.token, streams)
+
+    def invalidate_token(self) -> None:
+        self._token = ""
+
+
+def _discover_warehouse_uuids(
+    gql_key_id: str,
+    gql_key_secret: str,
+    sf_org_domain: str,
+) -> dict:
+    """
+    Queries MC getWarehouses and matches metadataConnection.identifiers to auto-discover:
+      - Data Cloud warehouse: SALESFORCE_DATA_CLOUD whose domain == SF_ORG_URL hostname
+      - CRM warehouse:        SALESFORCE_CRM whose domain == SF_ORG_URL hostname
+      - Snowflake warehouses: all SNOWFLAKE warehouses, keyed by account identifier (lowercase)
+
+    The domain match is exact (case-insensitive): MC stores the same hostname that
+    Salesforce reports in SF_ORG_URL, so there is no ambiguity or guessing.
+
+    Returns:
+      {"dc_uuid": str|None, "crm_uuid": str|None, "snowflake_map": {account_lower: uuid}}
+      dc_uuid / crm_uuid are None on failure OR when multiple matches are found (caller
+      should then require explicit env var override).
+    """
+    _EMPTY: dict = {"dc_uuid": None, "crm_uuid": None, "snowflake_map": {}}
+    query = """
+    query {
+      getWarehouses {
+        uuid connectionType
+        metadataConnection { identifiers }
+      }
+    }
+    """
+    try:
+        data = _gql(query, gql_key_id, gql_key_secret)
+        warehouses = (data or {}).get("getWarehouses") or []
+    except Exception as exc:
+        log.warning("  Warehouse auto-discovery failed (%s) — relying on env var overrides.", exc)
+        return _EMPTY
+
+    if len(warehouses) >= _MAX_WAREHOUSES_DISCOVERY:
+        log.error(
+            "  getWarehouses returned %d warehouse(s) — the result may be truncated. "
+            "Auto-discovery is unreliable for this account. Set MCD_DC_WAREHOUSE_UUID "
+            "(or MCD_RESOURCE_UUID), MCD_CRM_WAREHOUSE_UUID, and MCD_SNOWFLAKE_WAREHOUSE_MAP "
+            "as explicit overrides to bypass discovery.",
+            len(warehouses),
+        )
+
+    domain_lower = sf_org_domain.lower()
+    dc_matches: list = []
+    crm_matches: list = []
+    snowflake_map: dict = {}
+
+    for wh in warehouses:
+        ct   = wh.get("connectionType", "")
+        uuid = wh.get("uuid", "")
+        raw  = (wh.get("metadataConnection") or {}).get("identifiers") or "[]"
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = []
+        idents = {
+            item["key"]: item.get("value", "")
+            for item in raw
+            if isinstance(item, dict) and "key" in item
+        }
+
+        if ct == "SALESFORCE_DATA_CLOUD":
+            if idents.get("domain", "").lower() == domain_lower:
+                dc_matches.append(uuid)
+        elif ct == "SALESFORCE_CRM":
+            if idents.get("domain", "").lower() == domain_lower:
+                crm_matches.append(uuid)
+        elif ct == "SNOWFLAKE":
+            acct = idents.get("account", "")
+            if acct:
+                snowflake_map[acct.lower()] = uuid
+
+    dc_uuid: Optional[str] = None
+    if len(dc_matches) > 1:
+        log.error(
+            "  Auto-discovery found %d Data Cloud warehouses for domain %r: %s. "
+            "Set MCD_DC_WAREHOUSE_UUID (or MCD_RESOURCE_UUID) to the correct UUID.",
+            len(dc_matches), sf_org_domain, ", ".join(dc_matches),
+        )
+    elif dc_matches:
+        dc_uuid = dc_matches[0]
+
+    crm_uuid: Optional[str] = None
+    if len(crm_matches) > 1:
+        log.error(
+            "  Auto-discovery found %d CRM warehouses for domain %r: %s. "
+            "Set MCD_CRM_WAREHOUSE_UUID to the correct UUID.",
+            len(crm_matches), sf_org_domain, ", ".join(crm_matches),
+        )
+    elif crm_matches:
+        crm_uuid = crm_matches[0]
+
+    return {"dc_uuid": dc_uuid, "crm_uuid": crm_uuid, "snowflake_map": snowflake_map}
 
 
 class MCLineageService:
@@ -1643,19 +1800,14 @@ def main() -> None:
         mcd_ingest_token = _require("MCD_INGEST_TOKEN")
         # Accept MCD_RESOURCE_UUID as an alias for MCD_DC_WAREHOUSE_UUID so that
         # users running both scripts from the same .env only need to set one variable.
+        # If neither is set, the UUID is auto-discovered from MC after SF auth.
         dc_warehouse_uuid = (
             os.environ.get("MCD_DC_WAREHOUSE_UUID")
             or os.environ.get("MCD_RESOURCE_UUID")
             or ""
         )
-        if not dc_warehouse_uuid:
-            log.error(
-                "Required environment variable 'MCD_DC_WAREHOUSE_UUID' is not set. "
-                "Also accepted as 'MCD_RESOURCE_UUID' (shared with push_lineage.py). "
-                "Find the UUID in Monte Carlo: Settings → Integrations → your Data Cloud connection."
-            )
-            sys.exit(1)
-        _validate_uuid("MCD_DC_WAREHOUSE_UUID", dc_warehouse_uuid)
+        if dc_warehouse_uuid:
+            _validate_uuid("MCD_DC_WAREHOUSE_UUID", dc_warehouse_uuid)
 
         crm_warehouse_uuid       = os.environ.get("MCD_CRM_WAREHOUSE_UUID")
         crm_warehouse_map_raw    = os.environ.get("MCD_CRM_WAREHOUSE_MAP", "")
@@ -1679,6 +1831,8 @@ def main() -> None:
             for acct_id, wh_uuid in sf_warehouse_map.items():
                 _validate_uuid(f"MCD_SNOWFLAKE_WAREHOUSE_MAP[{acct_id}]", wh_uuid)
             log.info("  Snowflake warehouse map: %d account(s) configured", len(sf_warehouse_map))
+
+        _batch_size = _parse_positive_int("INGEST_BATCH_SIZE", 500)
 
     # Salesforce creds — required for all modes including --discover
     sf_instance_url  = _require("SF_ORG_URL")
@@ -1750,7 +1904,47 @@ def main() -> None:
         need_crm = _CONNECTOR_SFDC in connector_types_present
         need_sf  = _CONNECTOR_SNOWFLAKE in connector_types_present
 
-        # Step 2b: Fetch connection details for all streams via MktDataConnection.
+        # Auto-discover MC warehouse UUIDs for any not provided via env vars.
+        # Matches by Salesforce org domain (CRM + Data Cloud) and Snowflake account ID.
+        _need_discovery = (
+            not dc_warehouse_uuid
+            or (need_crm and not crm_warehouse_uuid and not crm_warehouse_map)
+            or (need_sf and not sf_warehouse_map)
+        )
+        if _need_discovery:
+            sf_org_domain = _parsed_url.hostname or ""
+            log.info(
+                "Step 2b (discovery): Auto-discovering MC warehouse UUIDs for org: %s",
+                sf_org_domain,
+            )
+            _disc = _discover_warehouse_uuids(mcd_id, mcd_token, sf_org_domain)
+            if not dc_warehouse_uuid and _disc["dc_uuid"]:
+                dc_warehouse_uuid = _disc["dc_uuid"]
+                _validate_uuid("MCD_DC_WAREHOUSE_UUID", dc_warehouse_uuid)
+                log.info("  Discovered Data Cloud warehouse: %s", dc_warehouse_uuid)
+            if need_crm and not crm_warehouse_uuid and not crm_warehouse_map and _disc["crm_uuid"]:
+                crm_warehouse_uuid = _disc["crm_uuid"]
+                _validate_uuid("discovered CRM warehouse", crm_warehouse_uuid)
+                log.info("  Discovered CRM warehouse: %s", crm_warehouse_uuid)
+            if need_sf and not sf_warehouse_map and _disc["snowflake_map"]:
+                for _acct, _wh_uuid in _disc["snowflake_map"].items():
+                    _validate_uuid(f"discovered Snowflake warehouse for {_acct}", _wh_uuid)
+                sf_warehouse_map = _disc["snowflake_map"]
+                log.info(
+                    "  Discovered %d Snowflake warehouse(s): %s",
+                    len(sf_warehouse_map), ", ".join(sf_warehouse_map),
+                )
+
+        if not dc_warehouse_uuid:
+            log.error(
+                "Could not determine the Data Cloud warehouse UUID. "
+                "Set MCD_RESOURCE_UUID in your .env, or ensure your MC account has a "
+                "Salesforce Data Cloud connection for this org (%s).",
+                _parsed_url.hostname or sf_instance_url,
+            )
+            sys.exit(1)
+
+        # Step 2d: Fetch connection details for all streams via MktDataConnection.
         # Covers Snowflake (account routing) and any future connector types.
         # Native same-org CRM connections will not have a MktDataConnection record
         # and are silently omitted.
@@ -1774,6 +1968,29 @@ def main() -> None:
                     exc,
                 )
 
+        # SF API calls are done — drop the token from memory
+        sf_svc.invalidate_token()
+
+        # Eager catalog filter: trim sf_warehouse_map to only accounts actually referenced by
+        # streams. Auto-discovery may return every Snowflake warehouse connected to MC; without
+        # this filter we'd fetch a catalog for each one even if only one account is in use.
+        if need_sf and sf_warehouse_map and connection_details:
+            referenced_accounts = {
+                info.get("account_identifier", "").lower()
+                for info in connection_details.values()
+                if info.get("account_identifier")
+            }
+            if referenced_accounts:
+                pruned = {k: v for k, v in sf_warehouse_map.items() if k in referenced_accounts}
+                dropped = set(sf_warehouse_map) - set(pruned)
+                if dropped:
+                    log.info(
+                        "  Snowflake warehouse map pruned to %d account(s) referenced by streams "
+                        "(dropped unreferenced: %s)",
+                        len(pruned), ", ".join(sorted(dropped)),
+                    )
+                sf_warehouse_map = pruned
+
         # Step 3: Fetch catalogs for the warehouses we need
         t3 = time.monotonic()
         log.info("Step 3: Fetching MC catalog(s)")
@@ -1791,8 +2008,9 @@ def main() -> None:
                 crm_idx = mc_svc.fetch_catalog(crm_warehouse_uuid, "Salesforce CRM")
             elif not crm_warehouse_map:
                 log.warning(
-                    "  CRM streams detected but neither MCD_CRM_WAREHOUSE_UUID nor "
-                    "MCD_CRM_WAREHOUSE_MAP is set. CRM→DLO edges will be skipped."
+                    "  CRM streams detected but no CRM warehouse was found in MC for this org. "
+                    "CRM→DLO edges will be skipped. Ensure a Salesforce CRM connection exists in MC "
+                    "for this org, or set MCD_CRM_WAREHOUSE_UUID as an override."
                 )
 
         # Build sf_catalogs: {account_identifier → (_CatalogIndex, warehouse_uuid)}
@@ -1813,8 +2031,9 @@ def main() -> None:
                 sf_idx = mc_svc.fetch_catalog(snowflake_warehouse_uuid, "Snowflake (fallback)")
             elif not sf_warehouse_map:
                 log.warning(
-                    "  Snowflake streams detected but neither MCD_SNOWFLAKE_WAREHOUSE_UUID "
-                    "nor MCD_SNOWFLAKE_WAREHOUSE_MAP is set. Snowflake→DLO edges will be skipped."
+                    "  Snowflake streams detected but no Snowflake warehouse was found in MC. "
+                    "Snowflake→DLO edges will be skipped. Ensure a Snowflake connection exists in MC, "
+                    "or set MCD_SNOWFLAKE_WAREHOUSE_UUID as an override."
                 )
 
         log.info("  Step 3 complete (%.1fs)", time.monotonic() - t3)
@@ -1893,7 +2112,6 @@ def main() -> None:
         )
         sys.exit(0)
 
-    _batch_size = int(os.environ.get("INGEST_BATCH_SIZE", "500"))
     try:
         pushed_count = mc_svc.push_edges(edges, run_id, _batch_size, _shutdown_requested)
     except KeyboardInterrupt:

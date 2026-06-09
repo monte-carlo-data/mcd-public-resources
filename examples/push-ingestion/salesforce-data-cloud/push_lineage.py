@@ -370,6 +370,7 @@ class SalesforceDataCloudService:
             )
         resp.raise_for_status()
         self._token = data["access_token"]
+        self.client_secret = ""  # drop reference after use
         log.info("  Authenticated (%.1fs)", time.monotonic() - t0)
 
     @_retrying
@@ -533,7 +534,12 @@ class SalesforceDataCloudService:
         # Fast list to discover all record names (~0.5s)
         names = self._list_ostm_names()
         if not names:
-            log.warning("  listMetadata returned 0 ObjectSourceTargetMap records")
+            log.error(
+                "  listMetadata returned 0 ObjectSourceTargetMap records. "
+                "This means either (a) the org has no DLO→DMO mappings yet, or "
+                "(b) the connected Salesforce user lacks Metadata API read access. "
+                "Verify permissions with sf_diagnostic.py before re-running."
+            )
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w"):
                 pass
@@ -1335,12 +1341,12 @@ def main() -> None:
 
     log.info("DLO->DMO edges (%d total):", len(dlo_edges))
     for e in dlo_edges:
-        log.info("  [%s] %s -> %s", e["data_space"], e["source"], e["target"])
+        log.debug("  [%s] %s -> %s", e["data_space"], e["source"], e["target"])
 
     if not args.skip_cio:
         log.info("DMO->CIO edges (%d total):", len(cio_edges))
         for e in cio_edges:
-            log.info("  [%s] %s -> %s", e["data_space"], e["source"], e["target"])
+            log.debug("  [%s] %s -> %s", e["data_space"], e["source"], e["target"])
 
     if not dlo_edges and not cio_edges:
         log.warning(
