@@ -51,7 +51,7 @@ from defusedxml.ElementTree import ParseError as _ETParseError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from xml.sax.saxutils import escape
 
 import requests
@@ -721,6 +721,15 @@ class SalesforceDataCloudService:
 
     def _validate_same_origin(self, url: str) -> str:
         """Return absolute URL, rejecting any nextPageUrl that crosses origin or uses non-HTTPS."""
+        # Salesforce sometimes returns nextPageUrl with null-valued params (e.g.
+        # definitionType=null) which it then rejects on the subsequent request.
+        _p = urlparse(url)
+        _clean_qs = urlencode(
+            {k: v for k, v in parse_qs(_p.query, keep_blank_values=True).items()
+             if v and v[0] not in ("null", "")},
+            doseq=True,
+        )
+        url = urlunparse(_p._replace(query=_clean_qs))
         parsed_base = urlparse(self.instance_url)
         parsed = urlparse(url)
         if not parsed.scheme:
