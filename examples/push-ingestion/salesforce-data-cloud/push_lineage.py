@@ -731,8 +731,9 @@ class SalesforceDataCloudService:
         # definitionType=null) which it then rejects on the subsequent request.
         _p = urlparse(url)
         _clean_qs = urlencode(
-            {k: v for k, v in parse_qs(_p.query, keep_blank_values=True).items()
-             if v and v[0] not in ("null", "")},
+            {k: [x for x in v if x not in ("null", "")]
+             for k, v in parse_qs(_p.query, keep_blank_values=True).items()
+             if any(x not in ("null", "") for x in v)},
             doseq=True,
         )
         url = urlunparse(_p._replace(query=_clean_qs))

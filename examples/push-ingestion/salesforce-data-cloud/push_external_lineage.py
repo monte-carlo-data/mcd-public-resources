@@ -1803,13 +1803,13 @@ def main() -> None:
         # Accept MCD_RESOURCE_UUID as an alias for MCD_DC_WAREHOUSE_UUID so that
         # users running both scripts from the same .env only need to set one variable.
         # If neither is set, the UUID is auto-discovered from MC after SF auth.
-        dc_warehouse_uuid = (
-            os.environ.get("MCD_DC_WAREHOUSE_UUID")
-            or os.environ.get("MCD_RESOURCE_UUID")
-            or ""
+        _dc_uuid_var = (
+            "MCD_DC_WAREHOUSE_UUID" if os.environ.get("MCD_DC_WAREHOUSE_UUID")
+            else "MCD_RESOURCE_UUID"
         )
+        dc_warehouse_uuid = os.environ.get("MCD_DC_WAREHOUSE_UUID") or os.environ.get("MCD_RESOURCE_UUID") or ""
         if dc_warehouse_uuid:
-            _validate_uuid("MCD_DC_WAREHOUSE_UUID", dc_warehouse_uuid)
+            _validate_uuid(_dc_uuid_var, dc_warehouse_uuid)
 
         crm_warehouse_uuid       = os.environ.get("MCD_CRM_WAREHOUSE_UUID")
         crm_warehouse_map_raw    = os.environ.get("MCD_CRM_WAREHOUSE_MAP", "")

@@ -495,8 +495,9 @@ def check_calculated_insights(instance_url, token):
             # definitionType=null) which it then rejects on the subsequent request.
             _pn = urlparse(raw_next)
             _clean_qs = urlencode(
-                {k: v for k, v in parse_qs(_pn.query, keep_blank_values=True).items()
-                 if v and v[0] not in ("null", "")},
+                {k: [x for x in v if x not in ("null", "")]
+                 for k, v in parse_qs(_pn.query, keep_blank_values=True).items()
+                 if any(x not in ("null", "") for x in v)},
                 doseq=True,
             )
             raw_next = urlunparse(_pn._replace(query=_clean_qs))
