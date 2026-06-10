@@ -84,6 +84,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 # ── Constants ─────────────────────────────────────────────────────────────────
 SF_API_VERSION = "62.0"
 MC_GRAPHQL_URL = "https://api.getmontecarlo.com/graphql"
+MC_INGEST_URL  = "https://integrations.getmontecarlo.com"
 
 _CONNECTOR_SFDC = "SalesforceDotCom"
 _CONNECTOR_SNOWFLAKE = "SNOWFLAKE"
@@ -1497,6 +1498,7 @@ def push_edges(
         mcd_id=ingest_key_id,
         mcd_token=ingest_key_secret,
         scope="Ingestion",
+        endpoint=MC_INGEST_URL,
     )))
 
     _resource_type_map = {
@@ -1778,7 +1780,7 @@ def main() -> None:
     def _handle_sigterm(signum, frame):  # noqa: ANN001
         log.warning(
             "Received SIGTERM — stop requested. "
-            "Push will halt cleanly after the current edge. Re-run is safe (idempotent)."
+            "Push will halt cleanly after the current batch. Re-run is safe (idempotent)."
         )
         _shutdown_requested.set()
     signal.signal(signal.SIGTERM, _handle_sigterm)
