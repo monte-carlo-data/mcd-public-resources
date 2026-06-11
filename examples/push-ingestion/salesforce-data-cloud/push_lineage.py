@@ -384,7 +384,18 @@ class SalesforceDataCloudService:
             timeout=30,
         )
         resp.raise_for_status()
-        self._token = resp.json()["access_token"]
+        try:
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError(
+                f"Salesforce re-auth returned non-JSON response (status={resp.status_code})"
+            )
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError(
+                f"Salesforce re-auth response missing access_token (status={resp.status_code})"
+            )
+        self._token = token
 
     def invalidate_token(self) -> None:
         self._token = ""
@@ -820,7 +831,7 @@ class SalesforceDataCloudService:
                 except requests.exceptions.HTTPError as exc:
                     if (exc.response is not None
                             and exc.response.status_code == 401
-                            and attempt < 3):
+                            and attempt <= 3):
                         log.warning(
                             "  Token expired on CIO page %d — re-authenticating (attempt %d/3)...",
                             page, attempt,
