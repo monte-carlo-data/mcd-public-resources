@@ -23,7 +23,7 @@ import sys
 import time
 import zipfile
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from defusedxml.ElementTree import ParseError as _ETParseError
 from xml.sax.saxutils import escape
 
@@ -491,6 +491,16 @@ def check_calculated_insights(instance_url, token):
 
         raw_next = collection.get("nextPageUrl") or None
         if raw_next:
+            # Salesforce sometimes returns nextPageUrl with null-valued params (e.g.
+            # definitionType=null) which it then rejects on the subsequent request.
+            _pn = urlparse(raw_next)
+            _clean_qs = urlencode(
+                {k: [x for x in v if x not in ("null", "")]
+                 for k, v in parse_qs(_pn.query, keep_blank_values=True).items()
+                 if any(x not in ("null", "") for x in v)},
+                doseq=True,
+            )
+            raw_next = urlunparse(_pn._replace(query=_clean_qs))
             parsed_next = urlparse(raw_next)
             if not parsed_next.scheme:
                 if not raw_next.startswith("/"):

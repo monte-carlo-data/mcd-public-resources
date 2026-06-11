@@ -1,5 +1,5 @@
-requests>=2.31.0
-python-dotenv>=1.0.0
-pycarlo>=0.12.251
+requests>=2.33.0
+python-dotenv>=1.2.2
+pycarlo>=0.12.478
 tenacity>=8.2.0
 defusedxml>=0.7.1

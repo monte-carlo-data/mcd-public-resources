@@ -288,6 +288,40 @@ edge.
 
 ---
 
+## Required Salesforce Permissions
+
+The connected app's run-as user must have the following permissions. Missing any of
+these is the most common cause of `INSUFFICIENT_ACCESS` and `403` errors.
+
+### DLO→DMO lineage (Steps 1–4)
+
+**Run-as user profile permissions:**
+- `API Enabled`
+- `Modify Metadata Through Metadata API Functions` *(or `Modify All Data`)*
+
+These are set in Salesforce Setup → Users → your run-as user → Profile → Edit.
+
+### DMO→CIO lineage (Steps 5–8)
+
+In addition to the profile permissions above:
+
+**Run-as user permission set:**
+- `Data Cloud Admin` **or** `Data Cloud User`
+
+Assign in Salesforce Setup → Users → your run-as user → Permission Set Assignments.
+
+**Connected app OAuth scopes** (Salesforce Setup → App Manager → your app → Edit):
+- `Access and manage your data (api)`
+- `Perform requests on your behalf at any time (refresh_token, offline_access)`
+
+> The CIO endpoint (`/services/data/v62.0/ssot/calculated-insights`) is a Data Cloud
+> REST API that is separate from the Metadata API. Profile permissions alone do not
+> grant access to it — the `Data Cloud Admin` or `Data Cloud User` permission set is
+> required. If you only need DLO→DMO lineage, use `--skip-cio` to bypass Steps 5–8
+> entirely and the permission set is not needed.
+
+---
+
 ## Common Setup Checklist
 
 If you're unsure where a problem is, work through this list:
