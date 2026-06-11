@@ -579,7 +579,7 @@ def fetch_data_streams(
     to prevent SSRF via a malicious API response.
 
     reauth_fn: optional callable that returns a fresh access token. When provided,
-    a single 401 mid-pagination triggers one re-auth attempt and retries the page.
+    up to 3 re-auth attempts are made on a 401 before raising.
     """
     t0 = time.monotonic()
     log.info("Step 2: Fetching Data Streams from Salesforce")
@@ -602,10 +602,16 @@ def fetch_data_streams(
 
         resp = _http("GET", url, headers=headers, verify=True, timeout=30)
         if resp.status_code == 401 and reauth_fn is not None:
-            log.warning("  Token expired on page %d — re-authenticating and retrying...", page)
-            access_token = reauth_fn()
-            headers = {"Authorization": f"Bearer {access_token}"}
-            resp = _http("GET", url, headers=headers, verify=True, timeout=30)
+            for attempt in range(1, 4):
+                log.warning(
+                    "  Token expired on page %d — re-authenticating (attempt %d/3)...",
+                    page, attempt,
+                )
+                access_token = reauth_fn()
+                headers = {"Authorization": f"Bearer {access_token}"}
+                resp = _http("GET", url, headers=headers, verify=True, timeout=30)
+                if resp.status_code != 401:
+                    break
         resp.raise_for_status()
         try:
             body = resp.json()
