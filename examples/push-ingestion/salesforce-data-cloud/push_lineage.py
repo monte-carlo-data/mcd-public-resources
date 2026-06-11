@@ -370,8 +370,25 @@ class SalesforceDataCloudService:
             )
         resp.raise_for_status()
         self._token = data["access_token"]
-        self.client_secret = ""  # drop reference after use
         log.info("  Authenticated (%.1fs)", time.monotonic() - t0)
+
+    def _reauthenticate(self) -> None:
+        resp = requests.post(
+            f"{self.instance_url}/services/oauth2/token",
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     self.client_id,
+                "client_secret": self.client_secret,
+            },
+            verify=True,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        self._token = resp.json()["access_token"]
+
+    def invalidate_token(self) -> None:
+        self._token = ""
+        self.client_secret = ""  # drop credential reference when all API calls are complete
 
     @_retrying
     def _fetch_dataspaces_raw(self) -> requests.Response:
@@ -796,7 +813,21 @@ class SalesforceDataCloudService:
                     f"CIO pagination exceeded {MAX_CIO_PAGES} pages — possible infinite loop. "
                     "Check Salesforce API for a looping nextPageUrl."
                 )
-            data = self._fetch_cio_page(url)
+            for attempt in range(1, 4):
+                try:
+                    data = self._fetch_cio_page(url)
+                    break
+                except requests.exceptions.HTTPError as exc:
+                    if (exc.response is not None
+                            and exc.response.status_code == 401
+                            and attempt < 3):
+                        log.warning(
+                            "  Token expired on CIO page %d — re-authenticating (attempt %d/3)...",
+                            page, attempt,
+                        )
+                        self._reauthenticate()
+                    else:
+                        raise
             collection = data.get("collection", {})
             batch = collection.get("items", [])
             items.extend(batch)
@@ -1339,6 +1370,8 @@ def main() -> None:
         log.error("Unexpected error during data collection: %s: %s", type(exc).__name__, exc)
         log.debug("Traceback:", exc_info=True)
         sys.exit(2)
+    finally:
+        sf_svc.invalidate_token()
 
     log.info("DLO->DMO edges (%d total):", len(dlo_edges))
     for e in dlo_edges:

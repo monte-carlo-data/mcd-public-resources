@@ -649,6 +649,7 @@ def fetch_connection_details(
     instance_url: str,
     access_token: str,
     streams: list,
+    reauth_fn: Optional[callable] = None,
 ) -> dict:
     """
     For every data stream, attempt to look up its MktDataConnection via the
@@ -741,6 +742,20 @@ def fetch_connection_details(
                 verify=True,
                 timeout=30,
             )
+            if resp.status_code == 401 and reauth_fn is not None:
+                for attempt in range(1, 4):
+                    log.warning(
+                        "  Token expired (Tooling API) — re-authenticating (attempt %d/3)...",
+                        attempt,
+                    )
+                    access_token = reauth_fn()
+                    headers["Authorization"] = f"Bearer {access_token}"
+                    resp = _http(
+                        "GET", tooling_url, params=tooling_params,
+                        headers=headers, verify=True, timeout=30,
+                    )
+                    if resp.status_code != 401:
+                        break
             resp.raise_for_status()
             try:
                 body = resp.json()
@@ -1644,7 +1659,7 @@ class SalesforceService:
         return fetch_data_streams(self.instance_url, self.token, reauth_fn=self._reauthenticate)
 
     def fetch_connection_details(self, streams: list) -> dict:
-        return fetch_connection_details(self.instance_url, self.token, streams)
+        return fetch_connection_details(self.instance_url, self.token, streams, reauth_fn=self._reauthenticate)
 
     def invalidate_token(self) -> None:
         self._token = ""
