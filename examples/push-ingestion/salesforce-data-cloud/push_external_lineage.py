@@ -93,6 +93,10 @@ _SUPPORTED_CONNECTORS = {_CONNECTOR_SFDC, _CONNECTOR_SNOWFLAKE}
 # Safety ceiling for pagination loops — prevents runaway fetches from a buggy/malicious API
 _MAX_PAGES = 500
 
+# Page size for the Data Streams list endpoint. Salesforce defaults to 10; 200 reduces the
+# number of round-trips and avoids token expiry for orgs with hundreds of streams.
+_STREAM_PAGE_LIMIT = 200
+
 # Maximum response body size allowed before JSON parsing — guards against memory exhaustion
 # from a malicious or misconfigured server sending a very large response body.
 _MAX_RESPONSE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -564,16 +568,26 @@ def get_sf_token(instance_url: str, client_id: str, client_secret: str) -> str:
 
 
 # ── Step 2: Fetch Data Streams ────────────────────────────────────────────────
-def fetch_data_streams(instance_url: str, access_token: str) -> list:
+def fetch_data_streams(
+    instance_url: str,
+    access_token: str,
+    reauth_fn: Optional[callable] = None,
+) -> list:
     """
     Fetch all Data Streams from the Salesforce Connect REST API.
     Paginates via nextPageUrl; enforces same-origin validation on each page URL
     to prevent SSRF via a malicious API response.
+
+    reauth_fn: optional callable that returns a fresh access token. When provided,
+    a single 401 mid-pagination triggers one re-auth attempt and retries the page.
     """
     t0 = time.monotonic()
     log.info("Step 2: Fetching Data Streams from Salesforce")
     streams: list = []
-    url: Optional[str] = f"{instance_url}/services/data/v{SF_API_VERSION}/ssot/data-streams"
+    url: Optional[str] = (
+        f"{instance_url}/services/data/v{SF_API_VERSION}/ssot/data-streams"
+        f"?limit={_STREAM_PAGE_LIMIT}"
+    )
     headers = {"Authorization": f"Bearer {access_token}"}
     page = 0
     instance_parsed = urlparse(instance_url)
@@ -587,6 +601,11 @@ def fetch_data_streams(instance_url: str, access_token: str) -> list:
             )
 
         resp = _http("GET", url, headers=headers, verify=True, timeout=30)
+        if resp.status_code == 401 and reauth_fn is not None:
+            log.warning("  Token expired on page %d — re-authenticating and retrying...", page)
+            access_token = reauth_fn()
+            headers = {"Authorization": f"Bearer {access_token}"}
+            resp = _http("GET", url, headers=headers, verify=True, timeout=30)
         resp.raise_for_status()
         try:
             body = resp.json()
@@ -1603,10 +1622,7 @@ class SalesforceService:
         )
 
     def authenticate(self) -> None:
-        try:
-            self._token = get_sf_token(self.instance_url, self.client_id, self.client_secret)
-        finally:
-            self.client_secret = ""  # drop reference regardless of success or failure
+        self._token = get_sf_token(self.instance_url, self.client_id, self.client_secret)
 
     @property
     def token(self) -> str:
@@ -1614,14 +1630,19 @@ class SalesforceService:
             raise RuntimeError("Not authenticated — call authenticate() first.")
         return self._token
 
+    def _reauthenticate(self) -> str:
+        self._token = get_sf_token(self.instance_url, self.client_id, self.client_secret)
+        return self._token
+
     def fetch_data_streams(self) -> list:
-        return fetch_data_streams(self.instance_url, self.token)
+        return fetch_data_streams(self.instance_url, self.token, reauth_fn=self._reauthenticate)
 
     def fetch_connection_details(self, streams: list) -> dict:
         return fetch_connection_details(self.instance_url, self.token, streams)
 
     def invalidate_token(self) -> None:
         self._token = ""
+        self.client_secret = ""  # drop credential reference when all API calls are complete
 
 
 def _discover_warehouse_uuids(
