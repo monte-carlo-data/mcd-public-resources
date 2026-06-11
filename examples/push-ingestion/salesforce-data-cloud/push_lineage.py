@@ -824,7 +824,7 @@ class SalesforceDataCloudService:
                     f"CIO pagination exceeded {MAX_CIO_PAGES} pages — possible infinite loop. "
                     "Check Salesforce API for a looping nextPageUrl."
                 )
-            for attempt in range(1, 4):
+            for attempt in range(1, 5):
                 try:
                     data = self._fetch_cio_page(url)
                     break
