@@ -31,6 +31,7 @@ Optional env vars:
   METADATA_BATCH_SIZE    — ObjectSourceTargetMap records per retrieve batch (default: 10)
   METADATA_MAX_POLLS     — max SOAP polling attempts per batch (default: 120)
   METADATA_POLL_INTERVAL — seconds between SOAP polls (default: 5)
+  CIO_BATCH_SIZE         — CIOs per page from the calculated-insights API (default: 50)
   SF_DEFAULT_DATA_SPACE  — fallback data space name (default: default)
 """
 import argparse
@@ -115,6 +116,7 @@ INGEST_BATCH_SIZE      = _parse_positive_int("INGEST_BATCH_SIZE", 500)
 METADATA_BATCH_SIZE    = _parse_positive_int("METADATA_BATCH_SIZE", 10)
 METADATA_MAX_POLLS     = _parse_positive_int("METADATA_MAX_POLLS", 120)
 METADATA_POLL_INTERVAL = _parse_positive_float("METADATA_POLL_INTERVAL", 5.0)
+CIO_BATCH_SIZE         = _parse_positive_int("CIO_BATCH_SIZE", 50)
 
 ZIP_MAX_FILES  = 10_000
 ZIP_MAX_BYTES  = 500 * 1024 * 1024  # 500 MB
@@ -757,13 +759,15 @@ class SalesforceDataCloudService:
         """Return absolute URL, rejecting any nextPageUrl that crosses origin or uses non-HTTPS."""
         # Salesforce sometimes returns nextPageUrl with null-valued params (e.g.
         # definitionType=null) which it then rejects on the subsequent request.
+        # It also occasionally includes both `offset` and `pageToken` in nextPageUrl;
+        # sending both causes a 400 because pageToken already encodes the offset.
         _p = urlparse(url)
-        _clean_qs = urlencode(
-            {k: [x for x in v if x not in ("null", "")]
-             for k, v in parse_qs(_p.query, keep_blank_values=True).items()
-             if any(x not in ("null", "") for x in v)},
-            doseq=True,
-        )
+        _qs = {k: [x for x in v if x not in ("null", "")]
+               for k, v in parse_qs(_p.query, keep_blank_values=True).items()
+               if any(x not in ("null", "") for x in v)}
+        if "pageToken" in _qs and "offset" in _qs:
+            _qs.pop("pageToken", None)  # offset-based pagination is authoritative; pageToken conflicts
+        _clean_qs = urlencode(_qs, doseq=True)
         url = urlunparse(_p._replace(query=_clean_qs))
         parsed_base = urlparse(self.instance_url)
         parsed = urlparse(url)
@@ -815,6 +819,7 @@ class SalesforceDataCloudService:
         items = []
         url: Optional[str] = (
             f"{self.instance_url}/services/data/v{SF_API_VERSION}/ssot/calculated-insights"
+            f"?batchSize={CIO_BATCH_SIZE}"
         )
         page = 0
         while url:
