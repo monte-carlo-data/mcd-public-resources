@@ -16,7 +16,7 @@ Run with full debug logging:
 LOG_LEVEL=DEBUG python3 push_lineage.py --dry-run
 ```
 
-This prints every SOAP poll attempt, every catalog and edge decision, and step-level
+This prints every catalog and edge decision, and step-level
 events — without writing anything to Monte Carlo. It is safe to run as many times as needed.
 
 ---
@@ -79,61 +79,31 @@ UI: **Settings → Integrations → your Data Cloud connection**.
 
 ---
 
-## Metadata Retrieval Errors
+## DLO->DMO Mapping Retrieval Errors
 
-### Script appears to hang after "Step 3: Retrieving ObjectSourceTargetMap metadata"
+### `0 DLO->DMO edge(s) extracted` (Step 4)
 
-This is normal. The script first calls `listMetadata` to enumerate all records (~0.5s),
-then retrieves them in batches of 10 (configurable via `METADATA_BATCH_SIZE`). Each batch
-is an asynchronous SOAP job that typically completes in 5–10 seconds. Progress is logged
-after every batch with a rolling ETA:
+The read-only REST endpoint (`/ssot/data-model-object-mappings`) returned no source
+mappings for any catalogued DMO. Common causes:
+- No DLO->DMO mappings have been defined yet in Data 360.
+- The Data Cloud connector hasn't catalogued any DMOs in Monte Carlo yet — Step 3 will
+  show `0 catalogued DMO(s)`. Trigger a metadata sync in Monte Carlo and re-run.
 
-```
-[10:42:04] [INFO] Found 27 ObjectSourceTargetMap record(s) — retrieving in 3 batch(es) of up to 10
-[10:42:11] [INFO] Batch 1/3 complete (10 record(s), 6.5s) — est. 13s remaining
-[10:42:17] [INFO] Batch 2/3 complete (10 record(s), 6.5s) — est. 6s remaining
-[10:42:23] [INFO] Batch 3/3 complete (7 record(s), 6.4s)
-```
+Run with `LOG_LEVEL=DEBUG` for per-DMO detail.
 
-If you see no progress messages at all, run with `LOG_LEVEL=DEBUG` to see each poll attempt.
+### `Mapping fetch failed for DMO '<name>'` warnings
 
-### `Batch retrieve did not complete within Xs`
+One or more per-DMO mapping GETs errored (timeout or 5xx) and were skipped, so their
+edges may be missing. The push is idempotent — re-run once the transient issue clears.
+A `404` from the endpoint is **not** an error: it means that DMO has no source mappings
+and is skipped silently (most installed standard DMOs are unmapped). If fetches are slow
+on a large org, lower `MAPPING_MAX_WORKERS` and re-run.
 
-A single batch timed out. The default per-batch timeout is 120 polls × 5 seconds = 10 minutes,
-which should be sufficient for any batch size. Options:
-1. Reduce `METADATA_BATCH_SIZE` (e.g. `METADATA_BATCH_SIZE=5`) so each batch is smaller
-2. Increase `METADATA_MAX_POLLS` if the org is under heavy load
-3. Try again — Salesforce metadata retrieval can be slow under org load
-4. Check Salesforce org status at status.salesforce.com
+### `HTTP 403` fetching data model objects or mappings
 
-### `Salesforce retrieve job failed [INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY]`
-
-The connected app's run-as user does not have permission to retrieve
-`ObjectSourceTargetMap` metadata. The user needs a profile or permission set that
-includes Metadata API access and Data Cloud administrative permissions.
-
-### `Salesforce SOAP fault [sf:INVALID_SESSION_ID]`
-
-The OAuth token expired during a long metadata poll. This is unusual with client
-credentials (tokens are typically valid for 2 hours) but can occur. Re-run the script
-to get a fresh token.
-
-### `ZIP contained no .objectSourceTargetMap files`
-
-The retrieve succeeded but no `ObjectSourceTargetMap` records exist in the org.
-Possible causes:
-- No DLO→DMO mappings have been defined yet in Data 360
-- The metadata type is not available in this Salesforce edition
-
-Run with `LOG_LEVEL=DEBUG` to see the full list of files returned in the ZIP. If the
-ZIP contains files ending in a different extension, contact Monte Carlo support.
-
-### `DLO->DMO edges (0 total)` after a successful retrieve
-
-The metadata was retrieved but none of the records contained DLO→DMO mappings
-(objects ending in `__dll` → `__dlm`). Confirm that your Data 360 org has DLO→DMO
-transformation mappings configured. If you see records in the XML but they are being
-skipped, run with `LOG_LEVEL=DEBUG` to see per-file parse details.
+The connected app's run-as user cannot read the Data Cloud REST API. Grant the `api`
+OAuth scope and assign a Data Cloud permission set (Data Cloud Admin or User). This is
+standard read access — **no "Modify Metadata" / Metadata API permission is required.**
 
 ---
 
@@ -147,7 +117,7 @@ When a table is missing, its lineage edge is skipped and this warning is logged.
 **Common causes:**
 - The Monte Carlo Data Cloud connector has not yet completed its first metadata scan
 - The table was created in Salesforce after the last connector sync
-- The table name in the `ObjectSourceTargetMap` does not match the catalogued name
+- The table name in the mapping record does not match the catalogued name
 
 **What to do:**
 1. In Monte Carlo, go to Settings → Integrations → your Data Cloud connection
@@ -177,8 +147,8 @@ Run with `LOG_LEVEL=DEBUG` to see the specific error.
 ### Step 5 returns HTTP 403 (CIO fetch fails)
 
 The connected app does not have permission to call the Data Cloud REST API
-(`/services/data/v62.0/ssot/calculated-insights`). This is a different permission from
-the Metadata API used in Step 3.
+(`/services/data/v62.0/ssot/calculated-insights`). This is the same Data Cloud REST
+API family used for DLO->DMO mappings in Steps 3-4.
 
 **What to do:**
 1. In Salesforce Setup → App Manager → your connected app → Edit
@@ -277,9 +247,8 @@ This usually means:
 ### Lineage appears in Monte Carlo but under the wrong schema / data space
 
 The data space assigned to an edge in Monte Carlo comes from (in priority order):
-1. The MC catalog's `dataset` field (authoritative — set during Step 4b validation)
-2. The `<dataSpace>` field in the `ObjectSourceTargetMap` XML
-3. The `SF_DEFAULT_DATA_SPACE` env var (default: `"default"`)
+1. The MC catalog's `dataset` field (authoritative — resolved during Step 4b validation)
+2. The `SF_DEFAULT_DATA_SPACE` env var (default: `"default"`), as a last-resort fallback
 
 If edges are landing under the wrong data space after validation, check that the
 tables are catalogued correctly in Monte Carlo (Settings → Integrations → your Data
@@ -291,15 +260,20 @@ edge.
 ## Required Salesforce Permissions
 
 The connected app's run-as user must have the following permissions. Missing any of
-these is the most common cause of `INSUFFICIENT_ACCESS` and `403` errors.
+these is the most common cause of `403` errors.
 
 ### DLO→DMO lineage (Steps 1–4)
 
-**Run-as user profile permissions:**
+**Run-as user profile permission:**
 - `API Enabled`
-- `Modify Metadata Through Metadata API Functions` *(or `Modify All Data`)*
 
-These are set in Salesforce Setup → Users → your run-as user → Profile → Edit.
+**Run-as user permission set:**
+- `Data Cloud Admin` **or** `Data Cloud User` — grants read access to the Data Cloud REST
+  API, including `/ssot/data-model-object-mappings`
+
+> **No "Modify Metadata" / Metadata API permission is required.** DLO→DMO lineage is read
+> entirely from the read-only Data Cloud REST API; the earlier SOAP Metadata API path
+> (which required "Modify Metadata Through Metadata API Functions") has been removed.
 
 ### DMO→CIO lineage (Steps 5–8)
 
@@ -314,11 +288,11 @@ Assign in Salesforce Setup → Users → your run-as user → Permission Set Ass
 - `Access and manage your data (api)`
 - `Perform requests on your behalf at any time (refresh_token, offline_access)`
 
-> The CIO endpoint (`/services/data/v62.0/ssot/calculated-insights`) is a Data Cloud
-> REST API that is separate from the Metadata API. Profile permissions alone do not
-> grant access to it — the `Data Cloud Admin` or `Data Cloud User` permission set is
-> required. If you only need DLO→DMO lineage, use `--skip-cio` to bypass Steps 5–8
-> entirely and the permission set is not needed.
+> All Data Cloud REST endpoints used here — `/ssot/data-model-object-mappings` (DLO→DMO)
+> and `/ssot/calculated-insights` (CIOs) — require the `Data Cloud Admin` or `Data Cloud
+> User` permission set; profile permissions alone do not grant access. `--skip-cio`
+> bypasses only Steps 5–8 (CIOs); the Data Cloud permission set is still needed for the
+> DLO→DMO lineage in Steps 3–4.
 
 ---
 

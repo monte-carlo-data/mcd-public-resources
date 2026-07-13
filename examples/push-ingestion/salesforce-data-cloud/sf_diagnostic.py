@@ -6,7 +6,7 @@ Validates that all Salesforce APIs used by the lineage push script are
 accessible and reports timing/volume data. No Monte Carlo credentials needed.
 
 Usage:
-  pip install requests python-dotenv defusedxml
+  pip install requests python-dotenv
   python3 sf_diagnostic.py
 
 Required env vars (or set in .env):
@@ -14,124 +14,21 @@ Required env vars (or set in .env):
   SF_CLIENT_ID     — Connected app consumer key
   SF_CLIENT_SECRET — Connected app consumer secret
 """
-import base64
-import io
+import concurrent.futures
 import ipaddress
 import os
 import socket
 import sys
 import time
-import zipfile
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from defusedxml.ElementTree import ParseError as _ETParseError
-from xml.sax.saxutils import escape
 
 import requests
 from dotenv import load_dotenv
 
-try:
-    import defusedxml.ElementTree as SafeET
-except ImportError as err:
-    sys.exit(
-        f"ERROR: defusedxml is not installed. Run: pip install defusedxml>=0.7.1\n  ({err})"
-    )
-
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 SF_API_VERSION = "62.0"
-ZIP_MAX_FILES  = 10_000
-ZIP_MAX_BYTES  = 500 * 1024 * 1024  # 500 MB
-
-
-def _parse_positive_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, str(default))
-    try:
-        val = int(raw)
-        if val < 1:
-            raise ValueError("must be >= 1")
-        return val
-    except ValueError as exc:
-        print(f"[FAIL] Invalid {name}={raw!r}: {exc}")
-        sys.exit(1)
-
-
-def _parse_positive_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, str(default))
-    try:
-        val = float(raw)
-        if val <= 0:
-            raise ValueError("must be > 0")
-        return val
-    except ValueError as exc:
-        print(f"[FAIL] Invalid {name}={raw!r}: {exc}")
-        sys.exit(1)
-
-
-METADATA_BATCH_SIZE    = _parse_positive_int("METADATA_BATCH_SIZE", 10)
-METADATA_MAX_POLLS     = _parse_positive_int("METADATA_MAX_POLLS", 120)
-METADATA_POLL_INTERVAL = _parse_positive_float("METADATA_POLL_INTERVAL", 5.0)
-
-SOAP_NS = {
-    "soapenv": "http://schemas.xmlsoap.org/soap/envelope/",
-    "met":     "http://soap.sforce.com/2006/04/metadata",
-}
-OSTM_NS = {"sf": "http://soap.sforce.com/2006/04/metadata"}
-
-_LIST_METADATA_ENVELOPE = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:met="http://soap.sforce.com/2006/04/metadata">
-  <soapenv:Header>
-    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    <met:listMetadata>
-      <met:queries><met:type>ObjectSourceTargetMap</met:type></met:queries>
-      <met:asOfVersion>{api_version}</met:asOfVersion>
-    </met:listMetadata>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-_RETRIEVE_BATCH_ENVELOPE = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:met="http://soap.sforce.com/2006/04/metadata">
-  <soapenv:Header>
-    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    <met:retrieve>
-      <met:retrieveRequest>
-        <met:apiVersion>{api_version}</met:apiVersion>
-        <met:unpackaged>
-          <met:types>
-            {members}
-            <met:name>ObjectSourceTargetMap</met:name>
-          </met:types>
-        </met:unpackaged>
-      </met:retrieveRequest>
-    </met:retrieve>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-_STATUS_ENVELOPE = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:met="http://soap.sforce.com/2006/04/metadata">
-  <soapenv:Header>
-    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    <met:checkRetrieveStatus>
-      <met:asyncProcessId>{async_id}</met:asyncProcessId>
-      <met:includeZip>true</met:includeZip>
-    </met:checkRetrieveStatus>
-  </soapenv:Body>
-</soapenv:Envelope>"""
 
 
 def _sep(label=""):
@@ -145,68 +42,6 @@ def _sep(label=""):
 def _ok(msg):  print(f"  [OK]   {msg}")
 def _warn(msg): print(f"  [WARN] {msg}")
 def _fail(msg): print(f"  [FAIL] {msg}")
-
-
-def _format_eta(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    mins, secs = divmod(int(seconds), 60)
-    return f"{mins}m {secs:02d}s"
-
-
-def _soap_post(url: str, envelope: str, action: str):
-    resp = requests.post(
-        url,
-        data=envelope.encode("utf-8"),
-        headers={"Content-Type": "text/xml", "SOAPAction": action},
-        timeout=60,
-        verify=True,
-    )
-    resp.raise_for_status()
-    root = SafeET.fromstring(resp.text)
-    fault = root.find(".//soapenv:Fault", SOAP_NS)
-    if fault is not None:
-        code = fault.findtext("faultcode", default="unknown")
-        msg  = (fault.findtext("faultstring", default="no detail") or "")[:200]
-        _fail(f"SOAP fault [{code}]: {msg}")
-        sys.exit(1)
-    return root
-
-
-def _poll_batch(url: str, token: str, async_id: str, label: str) -> bytes:
-    for attempt in range(METADATA_MAX_POLLS):
-        status_body = _STATUS_ENVELOPE.format(
-            session_id=escape(token), async_id=escape(async_id)
-        )
-        status_root = _soap_post(url, status_body, action="checkRetrieveStatus")
-
-        done_el  = status_root.find(".//met:done",   SOAP_NS)
-        state_el = status_root.find(".//met:status", SOAP_NS)
-        state    = state_el.text if state_el is not None else "unknown"
-
-        if done_el is not None and done_el.text == "true":
-            if state == "Failed":
-                err_code = status_root.findtext(".//met:errorStatusCode", default="", namespaces=SOAP_NS)
-                err_msg  = (status_root.findtext(".//met:errorMessage", default="", namespaces=SOAP_NS) or "")[:200]
-                _fail(f"Retrieve job failed [{err_code}]: {err_msg}")
-                sys.exit(1)
-            zip_el = status_root.find(".//met:zipFile", SOAP_NS)
-            if zip_el is None or not zip_el.text:
-                _fail("Retrieve completed but ZIP payload is empty")
-                sys.exit(1)
-            return base64.b64decode(zip_el.text)
-
-        if attempt % 5 == 0:
-            elapsed_msg = f"attempt {attempt + 1}/{METADATA_MAX_POLLS}, status={state}"
-            print(f"  [....] {label}: polling... {elapsed_msg}")
-        time.sleep(METADATA_POLL_INTERVAL)
-
-    _fail(
-        f"Retrieve did not complete within "
-        f"{METADATA_MAX_POLLS * METADATA_POLL_INTERVAL:.0f}s ({label}). "
-        f"Try increasing METADATA_MAX_POLLS (current: {METADATA_MAX_POLLS})."
-    )
-    sys.exit(1)
 
 
 def check_auth(instance_url, client_id, client_secret):
@@ -258,186 +93,125 @@ def check_data_spaces(instance_url, token):
         _ok(f"  • {s}")
     if len(spaces) > 1:
         _warn(
-            "Multiple data spaces found. The lineage push script will use the data space "
-            "recorded in each ObjectSourceTargetMap XML record. If a record has no <dataSpace> "
-            "field, it will fall back to SF_DEFAULT_DATA_SPACE (default: 'default'). "
-            "Set SF_DEFAULT_DATA_SPACE if your primary data space has a different name."
+            "Multiple data spaces found. The push script resolves each edge's data space from "
+            "the Monte Carlo catalog (authoritative); SF_DEFAULT_DATA_SPACE (default: 'default') "
+            "is only a last-resort fallback. Set it if your primary data space has a different name."
         )
     return spaces
 
 
-def check_metadata_retrieve(instance_url, token):
-    _sep("3. SOAP Metadata API — ObjectSourceTargetMap retrieve")
+def _enumerate_dmos(instance_url, token, max_dmos=150):
+    """List Data Model Object developer names via the Data Cloud REST API (paginated).
 
-    url = f"{instance_url}/services/Soap/m/{SF_API_VERSION}"
+    Bounded by max_dmos: this endpoint returns every installed standard DMO (often
+    1,000+), so the diagnostic samples up to max_dmos just to prove read access
+    quickly. The push script drives off the Monte Carlo catalog (complete/authoritative).
+    """
+    dmos, seen, offset, limit = [], set(), 0, 50
+    for _ in range(400):  # safety cap
+        try:
+            resp = requests.get(
+                f"{instance_url}/services/data/v{SF_API_VERSION}/ssot/data-model-objects",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"limit": limit, "offset": offset},
+                timeout=(10, 60), verify=True,
+            )
+        except requests.exceptions.RequestException as exc:
+            _warn(f"data-model-objects page at offset {offset} failed ({exc}) — "
+                  f"proceeding with the {len(dmos)} DMO(s) enumerated so far.")
+            break
+        if resp.status_code == 403:
+            return None
+        resp.raise_for_status()
+        page = resp.json().get("dataModelObject", []) or []
+        new = 0
+        for d in page:
+            name = d.get("name")
+            if name and name not in seen:
+                seen.add(name); dmos.append(name); new += 1
+        if len(dmos) >= max_dmos or len(page) < limit or new == 0:
+            break  # cap reached, last page, or offset not honored
+        offset += limit
+    return dmos[:max_dmos]
+
+
+def check_dlo_dmo_mappings(instance_url, token):
+    _sep("3. Data Cloud REST API — DLO->DMO mappings (read-only)")
     t0 = time.monotonic()
+    try:
+        max_dmos = max(1, int(os.environ.get("DIAG_MAX_DMOS", "150")))
+    except ValueError:
+        max_dmos = 150
+    dmos = _enumerate_dmos(instance_url, token, max_dmos=max_dmos)
+    if dmos is None:
+        _warn("HTTP 403 listing data model objects — the connected app lacks Data Cloud API access.")
+        _warn("Ensure the OAuth scope includes 'api' and the run-as user has a Data Cloud permission set.")
+        return
+    _ok(f"Enumerated {len(dmos)} data model object(s) in {time.monotonic() - t0:.1f}s")
+    if not dmos:
+        _warn("No data model objects returned — cannot check mappings.")
+        return
+    if len(dmos) >= max_dmos:
+        _warn(f"Sampled the first {max_dmos} DMO(s) to prove access (org has more — raise "
+              "DIAG_MAX_DMOS to check more). The push script uses the complete MC catalog.")
 
-    # Step 3a: list all record names via listMetadata (~0.5s)
-    list_envelope = _LIST_METADATA_ENVELOPE.format(
-        session_id=escape(token), api_version=escape(SF_API_VERSION)
+    _ok(f"Querying mappings for {len(dmos)} DMO(s) — read-only, no 'Modify Metadata' permission")
+    t1 = time.monotonic()
+    edges, errors, forbidden, checked = [], 0, False, 0
+
+    def _one(dmo):
+        r = requests.get(
+            f"{instance_url}/services/data/v{SF_API_VERSION}/ssot/data-model-object-mappings",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"dmoDeveloperName": dmo}, timeout=(10, 30), verify=True,
+        )
+        body = r.json() if r.headers.get("content-type", "").startswith("application/json") else None
+        return dmo, r.status_code, body
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        futs = {pool.submit(_one, d): d for d in dmos}
+        for fut in concurrent.futures.as_completed(futs):
+            checked += 1
+            try:
+                dmo, sc, body = fut.result()
+            except Exception:
+                errors += 1
+                continue
+            if sc == 403:
+                forbidden = True
+                continue
+            if sc == 404:
+                continue  # DMO has no source mappings — normal
+            if sc != 200 or not isinstance(body, dict):
+                errors += 1
+                continue
+            for m in (body.get("objectSourceTargetMaps") or []):
+                src = m.get("sourceEntityDeveloperName") or ""
+                tgt = m.get("targetEntityDeveloperName") or ""
+                if src.endswith("__dll") and tgt.endswith("__dlm"):
+                    edges.append((src, tgt))
+
+    if forbidden:
+        _warn("HTTP 403 on data-model-object-mappings — the connected app cannot read DLO->DMO mappings.")
+        _warn("This endpoint uses the standard Data Cloud API scope (no Metadata API / Modify Metadata).")
+        return
+
+    edges = sorted(set(edges))
+    _ok(f"Queried {checked} DMO(s) in {time.monotonic() - t1:.1f}s")
+    _ok(f"DLO->DMO edges found: {len(edges)}")
+    if errors:
+        _warn(f"{errors} DMO mapping query(ies) returned an unexpected status and were skipped.")
+    if not edges:
+        _warn("No DLO->DMO mappings found. Confirm DLO->DMO mappings exist in your Data Cloud org.")
+        return
+    print()
+    print("  DLO -> DMO edges (data space is resolved from the MC catalog at push time):")
+    for src, tgt in edges:
+        print(f"    {src} -> {tgt}")
+    _warn(
+        "Note: this list is enumerated from /ssot/data-model-objects, which can omit a few "
+        "mapped DMOs; the push script drives off the Monte Carlo catalog and is authoritative."
     )
-    list_root = _soap_post(url, list_envelope, action="listMetadata")
-    names = [
-        el.text
-        for el in list_root.findall(".//{http://soap.sforce.com/2006/04/metadata}fullName")
-        if el.text
-    ]
-    elapsed = time.monotonic() - t0
-    _ok(f"listMetadata returned {len(names)} record(s) in {elapsed:.1f}s")
-
-    if not names:
-        _warn("No ObjectSourceTargetMap records found in org")
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w"):
-            pass
-        return buf.getvalue()
-
-    # Step 3b: retrieve in batches
-    batches = [names[i:i + METADATA_BATCH_SIZE] for i in range(0, len(names), METADATA_BATCH_SIZE)]
-    total_batches = len(batches)
-    _ok(f"Retrieving {len(names)} record(s) in {total_batches} batch(es) of up to {METADATA_BATCH_SIZE}")
-
-    combined_buf = io.BytesIO()
-    batch_times: list = []
-    cumulative_uncompressed = 0
-
-    with zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED) as combined_zip:
-        for i, batch in enumerate(batches):
-            batch_num = i + 1
-            batch_t0 = time.monotonic()
-            members_xml = "\n            ".join(
-                f"<met:members>{escape(n)}</met:members>" for n in batch
-            )
-            retrieve_envelope = _RETRIEVE_BATCH_ENVELOPE.format(
-                session_id=escape(token),
-                api_version=escape(SF_API_VERSION),
-                members=members_xml,
-            )
-            retrieve_root = _soap_post(url, retrieve_envelope, action="retrieve")
-            async_id_el = retrieve_root.find(".//met:id", SOAP_NS)
-            if async_id_el is None or not async_id_el.text:
-                _fail(f"Batch {batch_num}: no async job ID returned")
-                sys.exit(1)
-            async_id = async_id_el.text
-
-            zip_bytes = _poll_batch(url, token, async_id, label=f"Batch {batch_num}/{total_batches}")
-            batch_elapsed = time.monotonic() - batch_t0
-            batch_times.append(batch_elapsed)
-
-            window = batch_times[-5:]
-            avg = sum(window) / len(window)
-            remaining = total_batches - batch_num
-            if remaining > 0:
-                _ok(
-                    f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), "
-                    f"{batch_elapsed:.1f}s) — est. {_format_eta(avg * remaining)} remaining"
-                )
-            else:
-                _ok(f"Batch {batch_num}/{total_batches} complete ({len(batch)} record(s), {batch_elapsed:.1f}s)")
-
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
-                if len(batch_zf.namelist()) > ZIP_MAX_FILES:
-                    _fail(
-                        f"Batch {batch_num} ZIP contains more than {ZIP_MAX_FILES} files — "
-                        "aborting to prevent decompression bomb."
-                    )
-                    sys.exit(1)
-                batch_uncompressed = sum(info.file_size for info in batch_zf.infolist())
-                if batch_uncompressed > ZIP_MAX_BYTES:
-                    _fail(
-                        f"Batch {batch_num} ZIP uncompressed size "
-                        f"{batch_uncompressed / 1024 / 1024:.0f}MB exceeds safety limit "
-                        f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
-                    )
-                    sys.exit(1)
-                cumulative_uncompressed += batch_uncompressed
-                if cumulative_uncompressed > ZIP_MAX_BYTES:
-                    _fail(
-                        f"Cumulative uncompressed size across {batch_num} batch(es) "
-                        f"({cumulative_uncompressed / 1024 / 1024:.0f}MB) exceeds safety limit "
-                        f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
-                    )
-                    sys.exit(1)
-                for name in batch_zf.namelist():
-                    if name.endswith("package.xml"):
-                        continue
-                    if "\x00" in name:
-                        print(f"  [WARN] Skipping ZIP entry with null byte in filename")
-                        continue
-                    safe_name = name.lstrip("/").replace("\\", "/")
-                    parts = [p for p in safe_name.split("/") if p and p not in (".", "..")]
-                    safe_name = "/".join(parts)
-                    if not safe_name:
-                        continue
-                    combined_zip.writestr(safe_name, batch_zf.read(name))
-
-    total_elapsed = time.monotonic() - t0
-    _ok(f"All {len(names)} record(s) retrieved in {total_elapsed:.1f}s")
-    return combined_buf.getvalue()
-
-
-def check_zip_contents(zip_bytes):
-    _sep("4. ObjectSourceTargetMap — parse DLO→DMO edges")
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        all_names = zf.namelist()
-        if len(all_names) > ZIP_MAX_FILES:
-            _fail(f"ZIP contains {len(all_names)} files — exceeds safety limit of {ZIP_MAX_FILES}.")
-            sys.exit(1)
-        total_uncompressed = sum(i.file_size for i in zf.infolist())
-        if total_uncompressed > ZIP_MAX_BYTES:
-            _fail(
-                f"ZIP total uncompressed size {total_uncompressed / 1024 / 1024:.0f}MB "
-                f"exceeds safety limit of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
-            )
-            sys.exit(1)
-
-        xml_files = [n for n in all_names if n.endswith(".objectSourceTargetMap")]
-        _ok(f"ZIP contains {len(all_names)} file(s) total")
-        _ok(f"ObjectSourceTargetMap records: {len(xml_files)}")
-
-        if not xml_files:
-            _warn("No .objectSourceTargetMap files found in ZIP")
-            _warn("Files present:")
-            for n in all_names[:20]:
-                _warn(f"  {n}")
-            return
-
-        edges = []
-        no_dataspace = 0
-        data_spaces_seen = set()
-
-        for name in xml_files:
-            with zf.open(name) as f:
-                try:
-                    root = SafeET.parse(f).getroot()
-                except _ETParseError:
-                    continue
-                source = root.findtext("sf:sourceObjectName", namespaces=OSTM_NS)
-                target = root.findtext("sf:targetObjectName", namespaces=OSTM_NS)
-                if not source or not target:
-                    continue
-                if source.endswith("__dll") and target.endswith("__dlm"):
-                    ds = root.findtext("sf:dataSpace", namespaces=OSTM_NS)
-                    if ds:
-                        data_spaces_seen.add(ds)
-                    else:
-                        no_dataspace += 1
-                    edges.append((source, target, ds or "(none in XML)"))
-
-        _ok(f"DLO→DMO edges found: {len(edges)}")
-
-        if data_spaces_seen:
-            _ok(f"Data spaces referenced in XML: {sorted(data_spaces_seen)}")
-        if no_dataspace:
-            _warn(
-                f"{no_dataspace}/{len(edges)} edges have no <dataSpace> field in XML. "
-                "The script will fall back to the value from the Dataspace SOQL query."
-            )
-
-        print()
-        print("  Edge list:")
-        for source, target, ds in edges:
-            print(f"    [{ds}] {source} → {target}")
 
 
 def check_calculated_insights(instance_url, token):
@@ -596,8 +370,7 @@ def main():
 
     token = check_auth(instance_url, client_id, client_secret)
     check_data_spaces(instance_url, token)
-    zip_bytes = check_metadata_retrieve(instance_url, token)
-    check_zip_contents(zip_bytes)
+    check_dlo_dmo_mappings(instance_url, token)
     check_calculated_insights(instance_url, token)
 
     _sep()

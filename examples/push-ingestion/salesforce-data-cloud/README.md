@@ -23,15 +23,16 @@ The script runs an eight-step pipeline:
    app credentials. A single token covers all data spaces (no per-dataspace credentials needed).
 2. **Fetch Data Spaces** — enumerates your Data 360 data spaces so lineage is attributed
    to the correct schema partition.
-3. **Retrieve ObjectSourceTargetMap metadata** — calls the Salesforce SOAP Metadata API
-   to get every DLO→DMO mapping defined in your org.
-4. **Parse DLO→DMO edges** — extracts source/target pairs and preliminary data space from
-   the XML metadata.
-4b. **Validate catalog coverage** — bulk-fetches all tables for the warehouse from Monte
-    Carlo's catalog in one paginated query (scoped to your Data Cloud warehouse UUID to
-    prevent cross-org contamination), then validates each DLO and DMO against that result
-    locally. Edges for uncatalogued tables are skipped and logged, so you can see exactly
-    what's missing and re-run once the connector syncs.
+3. **Fetch the Monte Carlo catalog** — bulk-fetches all tables for the warehouse in one
+   paginated query (scoped to your Data Cloud warehouse UUID to prevent cross-org
+   contamination) and enumerates the catalogued DMOs to query.
+4. **Retrieve DLO→DMO mappings** — one **read-only** GET per catalogued DMO against the
+   Data Cloud REST API (`/ssot/data-model-object-mappings`). No SOAP Metadata API and
+   **no "Modify Metadata" permission** — the mapping records carry the same source/target
+   developer names.
+4b. **Validate catalog coverage** — validates each DLO and DMO against the catalog from
+    step 3 locally. Edges for uncatalogued tables are skipped and logged, so you can see
+    exactly what's missing and re-run once the connector syncs.
 5. **Fetch Calculated Insight Objects** — calls the Data Cloud REST API
    (`/ssot/calculated-insights`) to retrieve all CIOs and their SQL expressions.
 6. **Parse DMO→CIO edges** — scans each CIO's SQL expression for `__dlm` and `__cio`
@@ -128,8 +129,10 @@ Find it in the Monte Carlo UI: **Settings → Integrations → your Data Cloud c
 The script uses the **client credentials** OAuth flow. Your connected app must:
 
 - Have **"Enable Client Credentials Flow"** checked under OAuth settings
-- Have API access and permission to retrieve `ObjectSourceTargetMap` metadata
-- Be assigned to a run-as user with Metadata API access
+- Have the `api` OAuth scope, with a run-as user assigned a Data Cloud permission set
+  (Data Cloud Admin or Data Cloud User) so it can read the Data Cloud REST API
+- **No "Modify Metadata" / Metadata API permission is required** — DLO→DMO lineage is
+  read entirely from the read-only Data Cloud REST API
 
 Set `SF_ORG_URL` to your org's **My Domain URL**
 (e.g. `https://mycompany.my.salesforce.com`), not `login.salesforce.com`.
@@ -145,9 +148,9 @@ Before running the full script, you can validate Salesforce connectivity indepen
 python3 sf_diagnostic.py
 ```
 
-This tests OAuth auth, the Dataspace SOQL query, the SOAP Metadata API retrieve, parses
-the resulting XML, and calls the Calculated Insights REST endpoint — printing timing,
-edge count, and data space information for all pipeline steps.
+This tests OAuth auth, the Dataspace SOQL query, the read-only DLO→DMO mapping REST
+endpoint, and the Calculated Insights REST endpoint — printing timing, edge count, and
+data space information for all pipeline steps.
 Useful for handing to a Salesforce admin to confirm API access before involving MC credentials.
 
 ---
@@ -173,10 +176,11 @@ Example output:
 [10:42:03] [INFO   ] [run=a1b2c3d4]   Authenticated (0.8s)
 [10:42:04] [INFO   ] [run=a1b2c3d4] Step 2: Fetching Salesforce data spaces
 [10:42:04] [INFO   ] [run=a1b2c3d4]   Found 1 data space(s): ['default']
-[10:42:04] [INFO   ] [run=a1b2c3d4] Step 3: Retrieving ObjectSourceTargetMap metadata
-[10:42:15] [INFO   ] [run=a1b2c3d4]   All 27 record(s) retrieved in 20.4s
-[10:42:15] [INFO   ] [run=a1b2c3d4] Step 4: Parsing DLO->DMO edges from metadata
-[10:42:15] [INFO   ] [run=a1b2c3d4]   20 DLO->DMO edge(s) extracted (0.0s)
+[10:42:04] [INFO   ] [run=a1b2c3d4] Step 3: Fetching Monte Carlo catalog for warehouse <uuid>
+[10:42:06] [INFO   ] [run=a1b2c3d4]   Fetched 71 table(s) from MC catalog (1.3s)
+[10:42:06] [INFO   ] [run=a1b2c3d4]   46 catalogued DMO(s) to query for DLO->DMO mappings
+[10:42:06] [INFO   ] [run=a1b2c3d4] Step 4: Retrieving DLO->DMO mappings via Data Cloud REST API (read-only; 46 catalogued DMO(s))
+[10:42:09] [INFO   ] [run=a1b2c3d4]   22 DLO->DMO edge(s) extracted from 16 mapped DMO(s) (3.6s)
 [10:42:15] [INFO   ] [run=a1b2c3d4] Step 4b: Validating DLO and DMO tables exist in Monte Carlo catalog
 [10:42:28] [INFO   ] [run=a1b2c3d4]   Catalog check complete: 40 matched, 0 not in catalog (1.1s)
 [10:42:28] [INFO   ] [run=a1b2c3d4]   20 edge(s) ready to push
@@ -263,9 +267,7 @@ LOG_FORMAT=json python3 push_lineage.py 2>> /var/log/data360-lineage.jsonl
 | `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOG_FORMAT` | plain | Set to `json` for structured log output |
 | `INGEST_BATCH_SIZE` | `500` | Edges per Monte Carlo push batch |
-| `METADATA_BATCH_SIZE` | `10` | ObjectSourceTargetMap records per retrieve batch (smaller = faster per-batch, more API calls) |
-| `METADATA_MAX_POLLS` | `120` | Max SOAP polling attempts per retrieve batch |
-| `METADATA_POLL_INTERVAL` | `5` | Seconds between SOAP polls |
+| `MAPPING_MAX_WORKERS` | `10` | Parallel per-DMO mapping fetches from the Data Cloud REST API |
 | `SF_DEFAULT_DATA_SPACE` | `default` | Fallback data space when XML has no `<dataSpace>` and the org has multiple data spaces |
 
 ---

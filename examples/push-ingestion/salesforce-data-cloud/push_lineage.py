@@ -5,10 +5,11 @@ Data 360 Lineage Push — DLO→DMO and DMO→CIO (Pandora Push Model)
 Pipeline:
   1. Authenticate with Salesforce via OAuth client credentials
   2. Fetch Salesforce data spaces (for data-space resolution fallback)
-  3. Retrieve ObjectSourceTargetMap metadata via SOAP Metadata API
-  4. Parse DLO->DMO edges; assign preliminary data space from XML field or fallback
-  4b. Validate tables exist in MC catalog; overwrite data space with authoritative
-      value from MC catalog dataset field
+  3. Fetch the Monte Carlo catalog and enumerate the catalogued DMOs
+  4. Retrieve DLO->DMO mappings via the Data Cloud REST API — one read-only GET per
+     catalogued DMO (no SOAP Metadata API, no 'Modify Metadata' permission required)
+  4b. Validate tables exist in MC catalog; MC catalog dataset field is authoritative
+      for data space
   5. Fetch Calculated Insight Objects (CIOs) via Data Cloud REST API
   6. Parse DMO->CIO edges by extracting table references from each CIO's SQL expression
   7. Push DLO->DMO lineage to Monte Carlo via pycarlo IngestionService
@@ -28,14 +29,11 @@ Optional env vars:
   LOG_LEVEL              — DEBUG/INFO/WARNING/ERROR (default: INFO)
   LOG_FORMAT             — json for structured output (default: plain)
   INGEST_BATCH_SIZE      — edges per push batch (default: 500)
-  METADATA_BATCH_SIZE    — ObjectSourceTargetMap records per retrieve batch (default: 10)
-  METADATA_MAX_POLLS     — max SOAP polling attempts per batch (default: 120)
-  METADATA_POLL_INTERVAL — seconds between SOAP polls (default: 5)
+  MAPPING_MAX_WORKERS    — parallel per-DMO mapping fetches (default: 10)
   SF_DEFAULT_DATA_SPACE  — fallback data space name (default: default)
 """
 import argparse
-import base64
-import io
+import concurrent.futures
 import ipaddress
 import json
 import logging
@@ -46,13 +44,10 @@ import socket
 import sys
 import time
 import uuid
-import zipfile
-from defusedxml.ElementTree import ParseError as _ETParseError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
-from xml.sax.saxutils import escape
 
 import requests
 from dotenv import load_dotenv
@@ -62,13 +57,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
-try:
-    import defusedxml.ElementTree as SafeET
-except ImportError as err:
-    sys.exit(
-        f"ERROR: defusedxml is not installed. Run: pip install defusedxml>=0.7.1\n  ({err})"
-    )
 
 try:
     from pycarlo.core import Client, Session
@@ -100,34 +88,13 @@ def _parse_positive_int(name: str, default: int) -> int:
         sys.exit(f"Invalid {name}={raw!r}: {exc}")
 
 
-def _parse_positive_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, str(default))
-    try:
-        val = float(raw)
-        if val <= 0:
-            raise ValueError("must be > 0")
-        return val
-    except ValueError as exc:
-        sys.exit(f"Invalid {name}={raw!r}: {exc}")
+INGEST_BATCH_SIZE   = _parse_positive_int("INGEST_BATCH_SIZE", 500)
+MAPPING_MAX_WORKERS = _parse_positive_int("MAPPING_MAX_WORKERS", 10)
 
-
-INGEST_BATCH_SIZE      = _parse_positive_int("INGEST_BATCH_SIZE", 500)
-METADATA_BATCH_SIZE    = _parse_positive_int("METADATA_BATCH_SIZE", 10)
-METADATA_MAX_POLLS     = _parse_positive_int("METADATA_MAX_POLLS", 120)
-METADATA_POLL_INTERVAL = _parse_positive_float("METADATA_POLL_INTERVAL", 5.0)
-
-ZIP_MAX_FILES  = 10_000
-ZIP_MAX_BYTES  = 500 * 1024 * 1024  # 500 MB
 # Safety ceiling on paginated API calls to prevent infinite loops if the API
 # returns a non-null next-page cursor indefinitely (server bug or misconfiguration).
 MAX_CIO_PAGES     = 1_000
 MAX_CATALOG_PAGES = 5_000
-
-OSTM_NS = {"sf": "http://soap.sforce.com/2006/04/metadata"}
-SOAP_NS = {
-    "soapenv": "http://schemas.xmlsoap.org/soap/envelope/",
-    "met":     "http://soap.sforce.com/2006/04/metadata",
-}
 
 # Matches any Data Cloud object name (DMO or CIO) anywhere in SQL text.
 # Scanning the full expression — rather than only FROM/JOIN clauses — means
@@ -135,62 +102,6 @@ SOAP_NS = {
 # The suffixes __dlm (DMO) and __cio (CIO) are unique to table objects;
 # fields use __c, so false positives are not a concern.
 _DATA_OBJECT_RE = re.compile(r"\b([A-Za-z0-9_]+(?:__dlm|__cio))\b", re.IGNORECASE)
-
-# ── SOAP envelope templates ───────────────────────────────────────────────────
-_LIST_METADATA_ENVELOPE = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:met="http://soap.sforce.com/2006/04/metadata">
-  <soapenv:Header>
-    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    <met:listMetadata>
-      <met:queries><met:type>ObjectSourceTargetMap</met:type></met:queries>
-      <met:asOfVersion>{api_version}</met:asOfVersion>
-    </met:listMetadata>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-_RETRIEVE_BATCH_ENVELOPE = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:met="http://soap.sforce.com/2006/04/metadata">
-  <soapenv:Header>
-    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    <met:retrieve>
-      <met:retrieveRequest>
-        <met:apiVersion>{api_version}</met:apiVersion>
-        <met:unpackaged>
-          <met:types>
-            {members}
-            <met:name>ObjectSourceTargetMap</met:name>
-          </met:types>
-        </met:unpackaged>
-      </met:retrieveRequest>
-    </met:retrieve>
-  </soapenv:Body>
-</soapenv:Envelope>"""
-
-_STATUS_ENVELOPE = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope
-    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
-    xmlns:met="http://soap.sforce.com/2006/04/metadata">
-  <soapenv:Header>
-    <met:SessionHeader><met:sessionId>{session_id}</met:sessionId></met:SessionHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    <met:checkRetrieveStatus>
-      <met:asyncProcessId>{async_id}</met:asyncProcessId>
-      <met:includeZip>true</met:includeZip>
-    </met:checkRetrieveStatus>
-  </soapenv:Body>
-</soapenv:Envelope>"""
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -453,304 +364,101 @@ class SalesforceDataCloudService:
         return ["default"]
 
     @_retrying
-    def _soap_post(self, body: str, action: str):
-        url = f"{self.instance_url}/services/Soap/m/{SF_API_VERSION}"
-        resp = requests.post(
-            url,
-            data=body.encode("utf-8"),
-            headers={"Content-Type": "text/xml", "SOAPAction": action},
+    def _fetch_dmo_mappings(self, dmo_developer_name: str) -> list:
+        """
+        Fetch DLO->DMO source/target mappings for one DMO via the Data Cloud REST API.
+
+        Read-only: uses the same OAuth/API scope as the other /ssot endpoints, with NO
+        SOAP Metadata API and NO 'Modify Metadata' permission. A 404 (NOT_FOUND) means
+        the DMO has no source mappings and is returned as an empty list (normal — most
+        installed standard DMOs are unmapped).
+        """
+        resp = requests.get(
+            f"{self.instance_url}/services/data/v{SF_API_VERSION}/ssot/data-model-object-mappings",
+            headers={"Authorization": f"Bearer {self._token}"},
+            params={"dmoDeveloperName": dmo_developer_name},
             verify=True,
-            timeout=60,
+            timeout=30,
         )
+        if resp.status_code == 404:
+            return []
         resp.raise_for_status()
-        root = SafeET.fromstring(resp.text)
-        fault = root.find(".//soapenv:Fault", SOAP_NS)
-        if fault is not None:
-            code = fault.findtext("faultcode", default="unknown")
-            msg  = _safe_snippet(fault.findtext("faultstring", default="no detail"))
-            raise RuntimeError(f"Salesforce SOAP fault [{code}]: {msg}")
-        return root
-
-    def _list_ostm_names(self) -> list[str]:
-        """Call listMetadata to get all ObjectSourceTargetMap record names. Completes in <1s."""
-        envelope = _LIST_METADATA_ENVELOPE.format(
-            session_id=escape(self._token),
-            api_version=escape(SF_API_VERSION),
-        )
-        root = self._soap_post(envelope, action="listMetadata")
-        return [
-            el.text
-            for el in root.findall(".//{http://soap.sforce.com/2006/04/metadata}fullName")
-            if el.text
-        ]
-
-    def _submit_retrieve(self, members_xml: str) -> str:
-        """Submit a retrieve job for specific members and return the async job ID."""
-        envelope = _RETRIEVE_BATCH_ENVELOPE.format(
-            session_id=escape(self._token),
-            api_version=escape(SF_API_VERSION),
-            members=members_xml,
-        )
-        root = self._soap_post(envelope, action="retrieve")
-        async_id_el = root.find(".//met:id", SOAP_NS)
-        if async_id_el is None:
-            fault_el = root.find(".//met:error", SOAP_NS)
-            detail = _safe_snippet(fault_el.findtext("faultstring") or fault_el.findtext("message") or "(no detail)") if fault_el is not None else "no error element"
-            raise RuntimeError(f"Retrieve returned no async ID. Detail: {detail}")
-        if not async_id_el.text:
-            raise RuntimeError("Salesforce returned an empty async job ID for the metadata retrieve.")
-        return async_id_el.text
-
-    def _poll_retrieve(self, async_id: str, label: str) -> bytes:
-        """Poll a retrieve job until complete and return ZIP bytes."""
-        consecutive_failures = 0
-        max_consecutive = 5
-
-        for attempt in range(METADATA_MAX_POLLS):
-            status_body = _STATUS_ENVELOPE.format(
-                session_id=escape(self._token),
-                async_id=escape(async_id),
-            )
-            try:
-                status_root = self._soap_post(status_body, action="checkRetrieveStatus")
-                consecutive_failures = 0
-            except (requests.exceptions.RequestException, RuntimeError) as exc:
-                consecutive_failures += 1
-                log.warning(
-                    "  %s poll %d failed (consecutive=%d/%d): %s",
-                    label, attempt + 1, consecutive_failures, max_consecutive, exc,
-                )
-                if consecutive_failures >= max_consecutive:
-                    raise RuntimeError(
-                        f"Metadata poll failed {max_consecutive} consecutive times. "
-                        f"Last error: {exc}. Async job ID: {async_id}"
-                    ) from exc
-                time.sleep(METADATA_POLL_INTERVAL)
-                continue
-
-            done_el  = status_root.find(".//met:done",   SOAP_NS)
-            state_el = status_root.find(".//met:status", SOAP_NS)
-            state    = (state_el.text or "unknown") if state_el is not None else "unknown"
-
-            if done_el is None:
-                log.warning("  %s poll %d: missing <done> element — treating as not done", label, attempt + 1)
-
-            if done_el is not None and done_el.text == "true":
-                if state == "Failed":
-                    err_code = status_root.findtext(".//met:errorStatusCode", default="", namespaces=SOAP_NS)
-                    err_msg  = _safe_snippet(status_root.findtext(".//met:errorMessage", default="", namespaces=SOAP_NS))
-                    raise RuntimeError(f"Salesforce retrieve job failed [{err_code}]: {err_msg}")
-                zip_el = status_root.find(".//met:zipFile", SOAP_NS)
-                if zip_el is None or not zip_el.text:
-                    raise RuntimeError("Retrieve completed but ZIP payload is empty.")
-                return base64.b64decode(zip_el.text)
-
-            log.debug("  %s poll %d/%d status=%s", label, attempt + 1, METADATA_MAX_POLLS, state)
-            if attempt < METADATA_MAX_POLLS - 1:
-                time.sleep(METADATA_POLL_INTERVAL)
-
-        raise TimeoutError(
-            f"Batch retrieve did not complete within "
-            f"{METADATA_MAX_POLLS * METADATA_POLL_INTERVAL:.0f}s. Async job ID: {async_id}. "
-            f"Increase METADATA_MAX_POLLS or METADATA_POLL_INTERVAL, or check Salesforce org status."
-        )
-
-    def fetch_metadata(self) -> bytes:
-        t0 = time.monotonic()
-        log.info("Step 3: Retrieving ObjectSourceTargetMap metadata from Salesforce")
-
-        # Fast list to discover all record names (~0.5s)
-        names = self._list_ostm_names()
-        if not names:
-            log.error(
-                "  listMetadata returned 0 ObjectSourceTargetMap records. "
-                "This means either (a) the org has no DLO→DMO mappings yet, or "
-                "(b) the connected Salesforce user lacks Metadata API read access. "
-                "Verify permissions with sf_diagnostic.py before re-running."
-            )
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w"):
-                pass
-            return buf.getvalue()
-
-        batches = [names[i:i + METADATA_BATCH_SIZE] for i in range(0, len(names), METADATA_BATCH_SIZE)]
-        total_batches = len(batches)
-        log.info(
-            "  Found %d ObjectSourceTargetMap record(s) — retrieving in %d batch(es) of up to %d",
-            len(names), total_batches, METADATA_BATCH_SIZE,
-        )
-
-        combined_buf = io.BytesIO()
-        batch_times: list[float] = []
-        cumulative_uncompressed = 0
-
-        with zipfile.ZipFile(combined_buf, "w", zipfile.ZIP_DEFLATED) as combined_zip:
-            for i, batch in enumerate(batches):
-                batch_num = i + 1
-                batch_t0 = time.monotonic()
-                members_xml = "\n            ".join(
-                    f"<met:members>{escape(n)}</met:members>" for n in batch
-                )
-                async_id = self._submit_retrieve(members_xml)
-                log.debug("  Batch %d/%d submitted (id=%s)", batch_num, total_batches, async_id)
-
-                zip_bytes = self._poll_retrieve(async_id, label=f"Batch {batch_num}/{total_batches}")
-                batch_elapsed = time.monotonic() - batch_t0
-                batch_times.append(batch_elapsed)
-
-                # Rolling average ETA over last 5 batches
-                window = batch_times[-5:]
-                avg = sum(window) / len(window)
-                remaining = total_batches - batch_num
-                if remaining > 0:
-                    log.info(
-                        "  Batch %d/%d complete (%d record(s), %.1fs) — est. %s remaining",
-                        batch_num, total_batches, len(batch), batch_elapsed, _format_eta(avg * remaining),
-                    )
-                else:
-                    log.info(
-                        "  Batch %d/%d complete (%d record(s), %.1fs)",
-                        batch_num, total_batches, len(batch), batch_elapsed,
-                    )
-
-                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as batch_zf:
-                    if len(batch_zf.namelist()) > ZIP_MAX_FILES:
-                        raise RuntimeError(
-                            f"Batch {batch_num} ZIP contains more than {ZIP_MAX_FILES} files — "
-                            "aborting to prevent decompression bomb."
-                        )
-                    batch_uncompressed = sum(info.file_size for info in batch_zf.infolist())
-                    if batch_uncompressed > ZIP_MAX_BYTES:
-                        raise RuntimeError(
-                            f"Batch {batch_num} ZIP uncompressed size "
-                            f"{batch_uncompressed / 1024 / 1024:.0f}MB exceeds safety limit "
-                            f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
-                        )
-                    cumulative_uncompressed += batch_uncompressed
-                    if cumulative_uncompressed > ZIP_MAX_BYTES:
-                        raise RuntimeError(
-                            f"Cumulative uncompressed size across {batch_num} batch(es) "
-                            f"({cumulative_uncompressed / 1024 / 1024:.0f}MB) exceeds safety limit "
-                            f"of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
-                        )
-                    for name in batch_zf.namelist():
-                        if name.endswith("package.xml"):
-                            continue  # skip sidecar manifest — one copy already present
-                        if "\x00" in name:
-                            log.warning("  Skipping ZIP entry with null byte in filename")
-                            continue
-                        # Strip leading slashes, normalize backslashes, and remove any
-                        # path-traversal (. and ..) components before writing to the combined ZIP.
-                        safe_name = name.lstrip("/").replace("\\", "/")
-                        parts = [p for p in safe_name.split("/") if p and p not in (".", "..")]
-                        safe_name = "/".join(parts)
-                        if not safe_name:
-                            continue
-                        combined_zip.writestr(safe_name, batch_zf.read(name))
-
-        log.info("  All %d record(s) retrieved in %.1fs", len(names), time.monotonic() - t0)
-        return combined_buf.getvalue()
-
-    def parse_edges(self, zip_bytes: bytes, fallback_dataspace: str) -> list:
-        """
-        Parse DLO->DMO edges from the ObjectSourceTargetMap ZIP payload.
-
-        Data space resolution order per record:
-          1. <dataSpace> XML field (preferred — present in most orgs)
-          2. fallback_dataspace (SF_DEFAULT_DATA_SPACE env var, default: 'default')
-        """
-        t0 = time.monotonic()
-        log.info("Step 4: Parsing DLO->DMO edges from metadata")
-        edges = []
-        skipped = 0
-        xml_had_dataspace = 0
-
-        buf = io.BytesIO(zip_bytes)
         try:
-            zf_handle = zipfile.ZipFile(buf)
-        except zipfile.BadZipFile as exc:
-            raise RuntimeError(f"Retrieved payload is not a valid ZIP: {exc}") from exc
-
-        with zf_handle as zf:
-            all_names = zf.namelist()
-            if len(all_names) > ZIP_MAX_FILES:
-                raise RuntimeError(
-                    f"ZIP contains {len(all_names)} files — exceeds safety limit of {ZIP_MAX_FILES}. "
-                    "Aborting to prevent decompression bomb."
-                )
-            total_uncompressed = sum(i.file_size for i in zf.infolist())
-            if total_uncompressed > ZIP_MAX_BYTES:
-                raise RuntimeError(
-                    f"ZIP total uncompressed size {total_uncompressed / 1024 / 1024:.0f}MB "
-                    f"exceeds safety limit of {ZIP_MAX_BYTES / 1024 / 1024:.0f}MB."
-                )
-
-            xml_files = [n for n in all_names if n.endswith(".objectSourceTargetMap")]
-            meta_xml_count = sum(
-                1 for n in all_names if n.endswith(".objectSourceTargetMap-meta.xml")
-            )
-            if meta_xml_count:
-                log.debug(
-                    "  Skipping %d .objectSourceTargetMap-meta.xml file(s) (metadata sidecar, not parsed)",
-                    meta_xml_count,
-                )
-
-            if not xml_files:
-                raise RuntimeError(
-                    "ZIP contained no .objectSourceTargetMap files. "
-                    "Check that the retrieve succeeded and the metadata type name is correct. "
-                    "Run with LOG_LEVEL=DEBUG to inspect the ZIP contents."
-                )
-            log.info("  Found %d ObjectSourceTargetMap record(s)", len(xml_files))
-
-            for name in xml_files:
-                with zf.open(name) as f:
-                    try:
-                        root = SafeET.parse(f).getroot()
-                    except _ETParseError as exc:
-                        log.warning("  Skipping %s: XML parse error: %s", name, exc)
-                        skipped += 1
-                        continue
-
-                source = root.findtext("sf:sourceObjectName", namespaces=OSTM_NS)
-                target = root.findtext("sf:targetObjectName", namespaces=OSTM_NS)
-
-                if not source or not target:
-                    log.warning("  Skipping %s: missing sourceObjectName or targetObjectName", name)
-                    skipped += 1
-                    continue
-
-                if not (source.endswith("__dll") and target.endswith("__dlm")):
-                    continue
-
-                data_space = root.findtext("sf:dataSpace", namespaces=OSTM_NS)
-                if data_space:
-                    xml_had_dataspace += 1
-                else:
-                    data_space = fallback_dataspace
-
-                edges.append({"source": source, "target": target, "data_space": data_space})
-
-        buf.close()  # ZipFile.__exit__ does not close the underlying BytesIO buffer
-
-        if skipped and skipped == len(xml_files):
+            body = resp.json()
+        except ValueError as exc:
             raise RuntimeError(
-                f"All {skipped} ObjectSourceTargetMap record(s) failed to parse. "
-                "Check Salesforce connectivity and metadata type availability."
-            )
-        if skipped:
-            log.warning("  Skipped %d record(s) due to parse errors", skipped)
-        if xml_had_dataspace:
-            log.info("  Data space resolved from XML: %d/%d edge(s)", xml_had_dataspace, len(edges))
-        if xml_had_dataspace < len(edges):
-            no_space_count = len(edges) - xml_had_dataspace
+                f"Non-JSON response from data-model-object-mappings for "
+                f"{dmo_developer_name!r} (HTTP {resp.status_code}): {_safe_snippet(resp.text)}"
+            ) from exc
+        return body.get("objectSourceTargetMaps") or []
+
+    def fetch_dlo_dmo_edges(self, dmo_specs: list, fallback_dataspace: str) -> list:
+        """
+        Fetch DLO->DMO lineage edges via the Data Cloud REST mapping endpoint.
+
+        `dmo_specs` is a list of (dmo_developer_name, preliminary_data_space) tuples —
+        the DMOs Monte Carlo actually catalogs — so we issue one read-only GET per
+        catalogued DMO rather than enumerating every installed standard DMO.
+
+        Replaces the former SOAP Metadata API retrieve of ObjectSourceTargetMap. The
+        REST record ({sourceEntityDeveloperName, targetEntityDeveloperName, status})
+        carries identical DLO->DMO information with no 'Modify Metadata' permission.
+        Data space here is preliminary; validate_edges() resolves the authoritative
+        value from the MC catalog dataset field.
+        """
+        t0 = time.monotonic()
+        log.info(
+            "Step 4: Retrieving DLO->DMO mappings via Data Cloud REST API "
+            "(read-only; %d catalogued DMO(s))",
+            len(dmo_specs),
+        )
+        if not dmo_specs:
+            log.warning("  No catalogued DMOs to query — 0 DLO->DMO edges extracted.")
+            return []
+
+        edges: list = []
+        seen: set = set()
+        mapped = 0
+        errors = 0
+
+        max_workers = min(MAPPING_MAX_WORKERS, len(dmo_specs))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_to_spec = {
+                pool.submit(self._fetch_dmo_mappings, name): (name, space)
+                for name, space in dmo_specs
+            }
+            for fut in concurrent.futures.as_completed(future_to_spec):
+                dmo_name, prelim_space = future_to_spec[fut]
+                try:
+                    maps = fut.result()
+                except Exception as exc:  # noqa: BLE001 — one DMO must not abort the run
+                    errors += 1
+                    log.warning("  Mapping fetch failed for DMO '%s': %s", dmo_name, exc)
+                    continue
+                if not maps:
+                    continue
+                mapped += 1
+                for m in maps:
+                    source = m.get("sourceEntityDeveloperName") or ""
+                    target = m.get("targetEntityDeveloperName") or ""
+                    if not (source.endswith("__dll") and target.endswith("__dlm")):
+                        continue
+                    key = (source.lower(), target.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    edges.append({"source": source, "target": target, "data_space": prelim_space})
+
+        log.info(
+            "  %d DLO->DMO edge(s) extracted from %d mapped DMO(s) (%.1fs)",
+            len(edges), mapped, time.monotonic() - t0,
+        )
+        if errors:
             log.warning(
-                "  %d/%d edge(s) have no <dataSpace> in XML — using fallback '%s'. "
-                "If your org uses multiple data spaces, set SF_DEFAULT_DATA_SPACE to match "
-                "or contact your Salesforce admin to confirm the data space name.",
-                no_space_count, len(edges), fallback_dataspace,
+                "  %d DMO mapping fetch(es) errored and were skipped — edges for those "
+                "DMOs may be missing. Re-run (idempotent) once the transient issue clears.",
+                errors,
             )
-        log.info("  %d DLO->DMO edge(s) extracted (%.1fs)", len(edges), time.monotonic() - t0)
         return edges
 
     def _validate_same_origin(self, url: str) -> str:
@@ -1040,40 +748,63 @@ class SalesforceDataCloudLineageService:
             return entry[0]
         return entry
 
-    def validate_edges(self, edges: list) -> list:
+    def fetch_catalog(self) -> dict:
         """
-        Fetch all tables for the warehouse from MC in bulk, then validate each edge.
-        Resolves the DMO's authoritative data space first, then resolves the DLO
-        preferring the DMO's data space — so DLOs shared across multiple data spaces
-        (e.g. a DLO added to both 'default' and 'unified_knowledge') resolve to the
-        correct pairing rather than the XML fallback. Edges where either table is
-        missing from the MC catalog, or where the DLO is not available in the DMO's
-        data space, are removed and logged. Returns the validated subset ready for push.
+        Fetch all tables for the warehouse from MC (bulk, paginated, scoped by dwId).
+        Fetched once and reused for both DMO enumeration and edge validation.
         """
-        if not edges:
-            return edges
-
-        log.info("Step 4b: Validating DLO and DMO tables exist in Monte Carlo catalog")
+        log.info("Step 3: Fetching Monte Carlo catalog for warehouse %s", self.resource_uuid)
         t0 = time.monotonic()
-
         try:
             mc_catalog = self._fetch_mc_catalog()
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             raise RuntimeError(
-                f"MC catalog fetch returned HTTP {status}. "
-                "Check MCD_ID/MCD_TOKEN."
+                f"MC catalog fetch returned HTTP {status}. Check MCD_ID/MCD_TOKEN."
             ) from exc
         except requests.exceptions.RequestException as exc:
             raise RuntimeError(
                 f"Network error fetching MC catalog: {exc}. "
                 "Check connectivity to https://api.getmontecarlo.com"
             ) from exc
-
         log.info(
             "  Fetched %d table(s) from MC catalog (%.1fs)",
             len(mc_catalog), time.monotonic() - t0,
         )
+        return mc_catalog
+
+    def catalogued_dmos(self, mc_catalog: dict, fallback_dataspace: str) -> list:
+        """
+        Return [(dmo_developer_name, preliminary_data_space)] for every DMO (__dlm) in
+        the MC catalog — the set of DMOs to query for DLO->DMO mappings. Iterating the
+        connector's own catalogued DMOs (rather than the full installed-DMO list) keeps
+        the REST fetch to one GET per relevant DMO. The preliminary data space is the
+        DMO's catalog dataset (authoritative); validate_edges confirms it downstream.
+        """
+        specs = []
+        for name, entry in mc_catalog.items():
+            if not name.endswith("__dlm"):
+                continue
+            space = entry if isinstance(entry, str) else fallback_dataspace
+            specs.append((name, space))
+        log.info("  %d catalogued DMO(s) to query for DLO->DMO mappings", len(specs))
+        return specs
+
+    def validate_edges(self, edges: list, mc_catalog: dict) -> list:
+        """
+        Validate each edge against the (pre-fetched) MC catalog.
+        Resolves the DMO's authoritative data space first, then resolves the DLO
+        preferring the DMO's data space — so DLOs shared across multiple data spaces
+        (e.g. a DLO added to both 'default' and 'unified_knowledge') resolve to the
+        correct pairing rather than the fallback. Edges where either table is missing
+        from the MC catalog, or where the DLO is not available in the DMO's data space,
+        are removed and logged. Returns the validated subset ready for push.
+        """
+        if not edges:
+            return edges
+
+        log.info("Step 4b: Validating DLO and DMO tables exist in Monte Carlo catalog")
+        t0 = time.monotonic()
 
         unique_names = sorted({e["source"] for e in edges} | {e["target"] for e in edges})
         missing_set: set = set()
@@ -1359,10 +1090,13 @@ def main() -> None:
                 fallback_space,
             )
 
-        # Steps 3-4b: DLO→DMO
-        zip_bytes = sf_svc.fetch_metadata()
-        dlo_edges = sf_svc.parse_edges(zip_bytes, fallback_space)
-        dlo_edges = lineage_svc.validate_edges(dlo_edges)
+        # Steps 3-4b: DLO→DMO via the read-only Data Cloud REST mapping endpoint.
+        # Fetch the MC catalog once, enumerate the catalogued DMOs, GET each DMO's
+        # mappings (no SOAP, no Modify Metadata), then validate against the same catalog.
+        mc_catalog = lineage_svc.fetch_catalog()
+        dmo_specs = lineage_svc.catalogued_dmos(mc_catalog, fallback_space)
+        dlo_edges = sf_svc.fetch_dlo_dmo_edges(dmo_specs, fallback_space)
+        dlo_edges = lineage_svc.validate_edges(dlo_edges, mc_catalog)
 
         # Steps 5-6: DMO→CIO (skipped if --skip-cio)
         # CIO catalog validation: DMO source tables were already validated in step 4b.
