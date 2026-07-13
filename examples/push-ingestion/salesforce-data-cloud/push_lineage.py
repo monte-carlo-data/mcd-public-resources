@@ -237,6 +237,19 @@ def _safe_snippet(text: str, max_len: int = 200) -> str:
     return cleaned[:max_len]
 
 
+def _asset_type(name: str) -> str:
+    """
+    Monte Carlo objectType for a Data Cloud object, by suffix.
+
+    The Data Cloud connector catalogs DLOs (__dll) as `table` and DMOs (__dlm) /
+    CIOs (__cio) as `view` (verified live against the catalog). LineageAssetRef.type
+    MUST match the catalogued objectType, or the edge lands on a phantom duplicate
+    node instead of the real one — a TABLE-typed push to a view-catalogued DMO
+    creates a disconnected 'table' node next to the real 'view' (confirmed live).
+    """
+    return "TABLE" if name.endswith("__dll") else "VIEW"
+
+
 # ── Salesforce service ────────────────────────────────────────────────────────
 class SalesforceDataCloudService:
     """Encapsulates Salesforce authentication and metadata retrieval."""
@@ -907,13 +920,13 @@ class SalesforceDataCloudLineageService:
         events = [
             LineageEvent(
                 destination=LineageAssetRef(
-                    type="TABLE",
+                    type=_asset_type(e["target"]),
                     database=DB,
                     schema=e["data_space"],
                     name=e["target"],
                 ),
                 sources=[LineageAssetRef(
-                    type="TABLE",
+                    type=_asset_type(e["source"]),
                     database=DB,
                     schema=e["data_space"],
                     name=e["source"],

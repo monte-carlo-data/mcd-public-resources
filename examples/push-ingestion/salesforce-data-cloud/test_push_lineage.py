@@ -140,6 +140,18 @@ class TestParseSqlInputs:
         assert sut._parse_sql_inputs("SELECT 1") == set()
 
 
+# ── _asset_type ──────────────────────────────────────────────────────────────
+class TestAssetType:
+    def test_dlo_is_table(self):
+        assert sut._asset_type("Account_Home__dll") == "TABLE"
+
+    def test_dmo_is_view(self):
+        assert sut._asset_type("ssot__Account__dlm") == "VIEW"
+
+    def test_cio_is_view(self):
+        assert sut._asset_type("Revenue__cio") == "VIEW"
+
+
 # ── SalesforceDataCloudService.token guard ────────────────────────────────────
 class TestTokenGuard:
     def test_raises_before_auth(self):
@@ -445,10 +457,12 @@ class TestPushEdges:
         assert ids == ["inv-1", "inv-2"]           # 3 edges / batch size 2 → 2 batches
         assert len(captured) == 2
         first = captured[0][0]
-        assert first.destination.type == "TABLE"
+        # objectType must match the catalog: __dlm target -> VIEW, __dll source -> TABLE
+        assert first.destination.type == "VIEW"
         assert first.destination.database == "salesforce-data-cloud"
         assert first.destination.schema == "sales"
         assert first.destination.name == "t0__dlm"
+        assert first.sources[0].type == "TABLE"
         assert first.sources[0].name == "s0__dll"
 
     def test_failure_saves_and_raises(self, monkeypatch):
