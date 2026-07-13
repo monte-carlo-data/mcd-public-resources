@@ -17,6 +17,7 @@ Required env vars (or set in .env):
 import concurrent.futures
 import ipaddress
 import os
+import re
 import socket
 import sys
 import time
@@ -29,6 +30,15 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 SF_API_VERSION = "62.0"
+
+# Redact long token-like strings before printing API response bodies. This script is
+# meant to be shared with Salesforce admins and its output pasted into tickets/Slack,
+# so mirror push_lineage.py's _safe_snippet and never echo raw bodies verbatim.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9._\-]{60,}")
+
+
+def _safe(text, max_len=200):
+    return _TOKEN_RE.sub("[…]", text or "")[:max_len]
 
 
 def _sep(label=""):
@@ -56,7 +66,7 @@ def check_auth(instance_url, client_id, client_secret):
     try:
         data = resp.json()
     except ValueError:
-        _fail(f"Non-JSON response from auth endpoint (HTTP {resp.status_code}): {resp.text[:200]}")
+        _fail(f"Non-JSON response from auth endpoint (HTTP {resp.status_code}): {_safe(resp.text)}")
         sys.exit(1)
     if "error" in data:
         _fail(f"Auth failed: {data.get('error')} — {data.get('error_description')}")
@@ -250,13 +260,13 @@ def check_calculated_insights(instance_url, token):
             return
 
         if resp.status_code != 200:
-            _fail(f"HTTP {resp.status_code} (page {page}): {resp.text[:200]}")
+            _fail(f"HTTP {resp.status_code} (page {page}): {_safe(resp.text)}")
             return
 
         try:
             data = resp.json()
         except ValueError:
-            _fail(f"Non-JSON response (page {page}): {resp.text[:200]}")
+            _fail(f"Non-JSON response (page {page}): {_safe(resp.text)}")
             return
 
         collection = data.get("collection", {})
@@ -278,11 +288,11 @@ def check_calculated_insights(instance_url, token):
             parsed_next = urlparse(raw_next)
             if not parsed_next.scheme:
                 if not raw_next.startswith("/"):
-                    _fail(f"Unexpected relative nextPageUrl (does not start with '/'): {raw_next[:200]!r} — pagination stopped, CIO list above may be incomplete.")
+                    _fail(f"Unexpected relative nextPageUrl (does not start with '/'): {_safe(raw_next)!r} — pagination stopped, CIO list above may be incomplete.")
                     return
                 next_url = f"{instance_url.rstrip('/')}{raw_next}"
             elif parsed_next.scheme != "https" or parsed_next.hostname != parsed_base.hostname:
-                _fail(f"Cross-origin or non-HTTPS nextPageUrl: {raw_next[:200]!r} — pagination stopped, CIO list above may be incomplete.")
+                _fail(f"Cross-origin or non-HTTPS nextPageUrl: {_safe(raw_next)!r} — pagination stopped, CIO list above may be incomplete.")
                 return
             else:
                 next_url = raw_next

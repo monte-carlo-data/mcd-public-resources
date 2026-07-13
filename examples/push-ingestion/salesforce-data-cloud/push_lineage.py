@@ -352,8 +352,8 @@ class SalesforceDataCloudService:
             log.warning(
                 "  Dataspace query returned 403 Forbidden — the connected app may lack "
                 "'Manage Data Cloud' or 'API Access' permissions. "
-                "Salesforce error: %s. Falling back to 'default'. "
-                "Edges without <dataSpace> in XML may land in the wrong data space.",
+                "Salesforce error: %s. Falling back to 'default' — edge data spaces are "
+                "still resolved from the MC catalog dataset field during validation.",
                 _safe_snippet(resp.text),
             )
         else:
@@ -372,6 +372,12 @@ class SalesforceDataCloudService:
         SOAP Metadata API and NO 'Modify Metadata' permission. A 404 (NOT_FOUND) means
         the DMO has no source mappings and is returned as an empty list (normal — most
         installed standard DMOs are unmapped).
+
+        dmoDeveloperName is matched case-insensitively by the endpoint: verified live that
+        the lowercased MC-catalog key (e.g. 'ssot__account__dlm') resolves identically to
+        the canonical-case name ('ssot__Account__dlm'), and the extracted edge count matches
+        the legacy SOAP path exactly — so passing the catalog's lowercased DMO name here
+        does not drop any mappings.
         """
         resp = requests.get(
             f"{self.instance_url}/services/data/v{SF_API_VERSION}/ssot/data-model-object-mappings",
@@ -392,7 +398,7 @@ class SalesforceDataCloudService:
             ) from exc
         return body.get("objectSourceTargetMaps") or []
 
-    def fetch_dlo_dmo_edges(self, dmo_specs: list, fallback_dataspace: str) -> list:
+    def fetch_dlo_dmo_edges(self, dmo_specs: list) -> list:
         """
         Fetch DLO->DMO lineage edges via the Data Cloud REST mapping endpoint.
 
@@ -739,13 +745,16 @@ class SalesforceDataCloudLineageService:
         if isinstance(entry, list):
             if preferred_data_space and preferred_data_space in entry:
                 return preferred_data_space
+            # Catalogued in multiple data spaces and the mapping's space can't be
+            # disambiguated — return None so the caller skips the edge rather than
+            # guessing a data space (a wrong-space edge is worse than a missing one).
             log.warning(
-                "  Table '%s' found in multiple data spaces in MC catalog: %s — "
-                "using '%s'. If edges land in the wrong data space, check which "
-                "data space the DLO→DMO mapping belongs to and set SF_DEFAULT_DATA_SPACE.",
-                table_name, entry, entry[0],
+                "  Table '%s' is catalogued in multiple data spaces %s and the mapping's "
+                "data space could not be disambiguated — skipping its edge(s). Set "
+                "SF_DEFAULT_DATA_SPACE to the intended data space to resolve.",
+                table_name, entry,
             )
-            return entry[0]
+            return None
         return entry
 
     def fetch_catalog(self) -> dict:
@@ -844,7 +853,7 @@ class SalesforceDataCloudLineageService:
             # Resolve DMO first to get its authoritative data space, then resolve
             # the DLO preferring the DMO's data space. DLOs can be explicitly shared
             # across data spaces in Salesforce; a DLO in both 'default' and
-            # 'unified_knowledge' should pair with the DMO's space, not the XML fallback.
+            # 'unified_knowledge' should pair with the DMO's space, not a fallback value.
             tgt_space = self._resolve_catalog(mc_catalog, e["target"], preferred_data_space=preferred)
             if tgt_space is None:
                 catalog_skips += 1
@@ -1081,12 +1090,14 @@ def main() -> None:
         sf_svc.authenticate()
 
         data_spaces = sf_svc.get_dataspaces()
-        # Single data space: use it directly. Multiple: XML <dataSpace> is authoritative;
-        # default_dataspace (SF_DEFAULT_DATA_SPACE) is a last-resort fallback only.
+        # Single data space: use it directly. Multiple: the MC catalog's dataset field is
+        # authoritative (resolved in validate_edges); default_dataspace
+        # (SF_DEFAULT_DATA_SPACE) is only a last-resort preliminary value.
         fallback_space = data_spaces[0] if len(data_spaces) == 1 else default_dataspace
         if len(data_spaces) > 1:
             log.info(
-                "  Multiple data spaces — DLO records without <dataSpace> will use '%s'",
+                "  Multiple data spaces — DMOs the MC catalog can't place in a single "
+                "data space will use '%s' as a preliminary value",
                 fallback_space,
             )
 
@@ -1095,7 +1106,7 @@ def main() -> None:
         # mappings (no SOAP, no Modify Metadata), then validate against the same catalog.
         mc_catalog = lineage_svc.fetch_catalog()
         dmo_specs = lineage_svc.catalogued_dmos(mc_catalog, fallback_space)
-        dlo_edges = sf_svc.fetch_dlo_dmo_edges(dmo_specs, fallback_space)
+        dlo_edges = sf_svc.fetch_dlo_dmo_edges(dmo_specs)
         dlo_edges = lineage_svc.validate_edges(dlo_edges, mc_catalog)
 
         # Steps 5-6: DMO→CIO (skipped if --skip-cio)
