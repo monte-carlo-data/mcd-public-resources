@@ -57,6 +57,14 @@ Parameters:
     Description: 'The Monte Carlo Agent Docker image for the ECS Service'
     Default: 'docker.io/montecarlodata/agent:latest-aws-generic'
 
+  AdditionalEnvVars:
+    Type: String
+    Description: >
+      Advanced/optional. Additional environment variables to set on the agent, as a JSON object
+      string mapping name to value (e.g. {"MCD_ORACLE_THICK_MODE":"true"}). Used to enable
+      optional agent features. Leave as {} if not needed.
+    Default: "{}"
+
 Resources:
   LogGroup:
     Type: 'AWS::Logs::LogGroup'
@@ -114,6 +122,8 @@ Resources:
               Value: "8"
             - Name: "GUNICORN_WORKERS"
               Value: "4"
+            - Name: "MCD_ADDITIONAL_ENV_VARS"
+              Value: !Ref AdditionalEnvVars
           HealthCheck:
             Command: ["CMD-SHELL", "curl -f http://localhost:8081/ || exit 1"]
             Interval: 30
