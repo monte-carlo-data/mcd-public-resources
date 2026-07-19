@@ -56,9 +56,44 @@ Parameters:
     MinValue: 128
     MaxValue: 10240
 
+  EnablePartitionProjection:
+    Type: String
+    Description: >
+      Declare the traces Glue table with Athena partition projection enabled (recommended).
+      Athena then computes partition locations from the projection ranges instead of
+      enumerating the Glue catalog, keeping multi-day queries fast as minute-grained
+      partitions accumulate. Requires TelemetryServiceNames.
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  TelemetryServiceNames:
+    Type: String
+    Description: >
+      Comma-separated OpenTelemetry service.name values your agents emit (the collector
+      writes each service's traces under its own S3 path segment). Required when
+      EnablePartitionProjection is true.
+    Default: ""
+
+  ProjectionYearRange:
+    Type: String
+    Description: >
+      Inclusive year range for Athena partition projection, as "min,max". Keep the range
+      tight - every extra year adds ~526k virtual partitions to the unpruned enumeration space.
+    Default: "2025,2032"
+    AllowedPattern: '^[0-9]{4},[0-9]{4}$'
+    ConstraintDescription: Must be two 4-digit years separated by a comma, e.g. "2025,2032"
+
+Rules:
+  ServiceNamesRequiredForProjection:
+    RuleCondition: !Equals [!Ref EnablePartitionProjection, "true"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TelemetryServiceNames, ""]]
+        AssertDescription: TelemetryServiceNames must be provided when EnablePartitionProjection is true
+
 Conditions:
   UseExistingSNS: !Not [!Equals [!Ref SNSTopicArn, ""]]
   CreateSNS: !Equals [!Ref SNSTopicArn, ""]
+  EnableProjection: !Equals [!Ref EnablePartitionProjection, "true"]
 
 Resources:
   # Glue Classifier
@@ -213,6 +248,76 @@ Resources:
         Name: !Sub "${AWS::StackName}-telemetry-db"
         Description: "Database for OpenTelemetry telemetry data"
 
+  # Glue Table for traces (declared only when partition projection is enabled).
+  #
+  # Without this resource the crawler creates and owns the table, and Athena enumerates
+  # every crawler-registered partition (one per minute of telemetry) when planning a
+  # query - enumeration cost grows unboundedly with data age. Declaring the table lets
+  # us attach Athena partition-projection parameters so partition locations are computed
+  # from the ranges below instead. The crawler still runs against the same table: its
+  # Tables.AddOrUpdateBehavior=MergeNewColumns update path only adds columns and never
+  # removes table parameters, so projection settings and the crawler coexist.
+  TracesTable:
+    Type: AWS::Glue::Table
+    Condition: EnableProjection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref TelemetryDatabase
+      TableInput:
+        Name: traces
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: traces
+          projection.enabled: "true"
+          # The collector writes traces under a bare <service.name> path segment; the
+          # crawler surfaces it as the leading string partition column partition_0.
+          projection.partition_0.type: enum
+          projection.partition_0.values: !Ref TelemetryServiceNames
+          projection.year.type: integer
+          projection.year.range: !Ref ProjectionYearRange
+          projection.month.type: integer
+          projection.month.range: "1,12"
+          projection.month.digits: "2"
+          projection.day.type: integer
+          projection.day.range: "1,31"
+          projection.day.digits: "2"
+          projection.hour.type: integer
+          projection.hour.range: "0,23"
+          projection.hour.digits: "2"
+          projection.minute.type: integer
+          projection.minute.range: "0,59"
+          projection.minute.digits: "2"
+          # ${!...} renders literal ${...} - Athena substitutes these, not CloudFormation.
+          storage.location.template: !Sub
+            - "s3://${BucketName}/mcd/otel-collector/traces/${!partition_0}/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/minute=${!minute}"
+            - BucketName: !Select [5, !Split [":", !Ref TelemetryDataBucketArn]]
+        StorageDescriptor:
+          Location: !Sub
+            - "s3://${BucketName}/mcd/otel-collector/traces/"
+            - BucketName: !Select [5, !Split [":", !Ref TelemetryDataBucketArn]]
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: com.amazonaws.glue.serde.GrokSerDe
+            Parameters:
+              input.format: "%{GREEDYDATA:value}"
+          Columns:
+            - Name: value
+              Type: string
+        PartitionKeys:
+          - Name: partition_0  # service.name path segment
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+          - Name: minute
+            Type: string
+
   # Glue Crawler
   TelemetryCrawler:
     Type: AWS::Glue::Crawler
@@ -239,6 +344,9 @@ Resources:
         {
           "Version": 1.0,
           "CrawlerOutput": {
+            "Partitions": {
+              "AddOrUpdateBehavior": "InheritFromTable"
+            },
             "Tables": {
               "AddOrUpdateBehavior": "MergeNewColumns",
               "TableThreshold": 1
