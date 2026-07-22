@@ -102,26 +102,6 @@ _TRIGGER_MAP = {
 }
 
 
-class PaginationParams:
-    """Translate the framework's ``(limit, offset)`` into a vendor ``page``/``size``.
-
-    The framework pages by a fixed ``limit`` (``offset`` is always a multiple of
-    it), so ``page = offset // limit`` and ``size = limit`` map exactly.
-    """
-
-    def __init__(self, limit: int, offset: int) -> None:
-        if limit < 1:
-            raise ValueError(f"limit must be >= 1; got {limit}")
-        self.limit = limit
-        self.offset = offset
-
-    def get_size(self) -> int:
-        return self.limit
-
-    def get_page(self) -> int:
-        return self.offset // self.limit
-
-
 class Connector:
     """ETL connector for Matillion Data Productivity Cloud."""
 
@@ -225,10 +205,9 @@ class Connector:
         ``page``/``size``, and each asset is enriched best-effort with its
         pipeline's components as ``tasks`` (see :meth:`_schedule_tasks`).
         """
-        pag = PaginationParams(limit, offset)
         body = self._request(
             f"/v1/projects/{self._project_id}/schedules",
-            params={"page": pag.get_page(), "size": pag.get_size()},
+            params={"page": offset // limit, "size": limit},
         )
         assets: List[dict] = []
         for schedule in body.get("results", []) or []:
@@ -405,12 +384,8 @@ class Connector:
 
         started_at = _to_iso(execution.get("startedAt"))
         finished_at = _to_iso(execution.get("finishedAt"))
-        is_terminal = raw_status in _TERMINAL_VENDOR_STATUSES
 
-        end_time = finished_at
-        if is_terminal and not end_time:
-            # Terminal runs must carry an end_time; fall back to start time.
-            end_time = started_at
+        end_time = _terminal_end_time(started_at, finished_at, raw_status)
         event_time = finished_at or started_at
         if not event_time:
             # event_time is required; a run with no timestamps can't be reported.
@@ -433,11 +408,9 @@ class Connector:
             event["group"] = _group(environment_name)
 
         if raw_status in _ERROR_VENDOR_STATUSES:
-            event["error"] = {
-                "message": execution.get("message")
-                or f"Pipeline execution {raw_status}",
-                "failure_type": raw_status,
-            }
+            event["error"] = _error_dict(
+                execution.get("message"), raw_status, f"Pipeline execution {raw_status}"
+            )
 
         task_runs = self._build_task_runs(
             project_id,
@@ -487,9 +460,7 @@ class Connector:
 
             started_at = _to_iso(result.get("startedAt")) or run_started_at
             finished_at = _to_iso(result.get("finishedAt")) or run_finished_at
-            end_time = finished_at
-            if raw_status in _TERMINAL_VENDOR_STATUSES and not end_time:
-                end_time = started_at
+            end_time = _terminal_end_time(started_at, finished_at, raw_status)
 
             task_run = {
                 "job_source_id": job_source_id,
@@ -501,10 +472,9 @@ class Connector:
                 "end_time": end_time,
             }
             if raw_status in _ERROR_VENDOR_STATUSES:
-                task_run["error"] = {
-                    "message": result.get("message") or f"Component {raw_status}",
-                    "failure_type": raw_status,
-                }
+                task_run["error"] = _error_dict(
+                    result.get("message"), raw_status, f"Component {raw_status}"
+                )
             task_runs.append(_compact(task_run))
         return task_runs
 
@@ -553,8 +523,35 @@ def _compact(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None and v != []}
 
 
+def _terminal_end_time(
+    started_at: Optional[str], finished_at: Optional[str], raw_status: str
+) -> Optional[str]:
+    """End time for a run or task run.
+
+    Uses the reported finish time, falling back to the start time when a
+    terminal status omits its own finish (terminal events must carry an
+    ``end_time``). Non-terminal events without a finish get ``None``.
+    """
+    if finished_at:
+        return finished_at
+    if raw_status in _TERMINAL_VENDOR_STATUSES:
+        return started_at
+    return None
+
+
+def _error_dict(message: Optional[str], raw_status: str, default: str) -> dict:
+    """Build the ``error`` dict required on failed run/task events."""
+    return {"message": message or default, "failure_type": raw_status}
+
+
 def _to_api_datetime(dt: datetime) -> str:
-    """Format a datetime as a UTC ISO-8601 ``...Z`` string for API query params."""
+    """Format a datetime as a UTC ISO-8601 ``...Z`` string for API query params.
+
+    Naive datetimes are assumed UTC (matching :func:`_parse_datetime`) so a
+    missing tzinfo can't silently shift the window by the host's UTC offset.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
