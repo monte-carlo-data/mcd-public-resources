@@ -464,20 +464,31 @@ def _sub_workflows(config: dict) -> List[dict]:
 
 
 def _triggered_job_source_ids(config: dict) -> List[str]:
-    """Child job(s) a state starts via the ``states:startExecution`` integration.
+    """Child job(s) a state starts via the ``startExecution`` integration.
 
-    A state that invokes another state machine
-    (``Resource: arn:aws:states:::states:startExecution[.sync[:2]|.waitForTaskToken]``)
-    carries the child's ARN in ``Parameters.StateMachineArn`` — that ARN is the
-    child's ``job_source_id``, giving job→job lineage. Only a literal ARN is
-    resolvable; a dynamic ``StateMachineArn.$`` (chosen from run input) can't be
+    A state that invokes another state machine carries the child's ARN in its
+    task inputs — under ``Arguments.StateMachineArn`` for JSONata state machines
+    or ``Parameters.StateMachineArn`` for JSONPath ones. That ARN is the child's
+    ``job_source_id``, giving job→job lineage. Matches both the optimized
+    (``arn:aws:states:::states:startExecution[.sync[:2]|.waitForTaskToken]``) and
+    the AWS SDK (``arn:aws:states:::aws-sdk:sfn:startExecution``) integrations.
+
+    Only a literal ARN is resolvable; a value chosen at runtime — a JSONPath
+    ``StateMachineArn.$`` or a JSONata expression like ``{% ... %}`` — can't be
     known at metadata time and is skipped.
     """
     resource = config.get("Resource") or ""
-    if not resource.startswith("arn:aws:states:::states:startExecution"):
+    if not (
+        resource.startswith("arn:aws:states:::states:startExecution")
+        or resource.startswith("arn:aws:states:::aws-sdk:sfn:startExecution")
+    ):
         return []
-    child_arn = (config.get("Parameters") or {}).get("StateMachineArn")
-    return [child_arn] if isinstance(child_arn, str) and child_arn else []
+    # JSONata task inputs live under "Arguments"; JSONPath ones under "Parameters".
+    args = config.get("Arguments") or config.get("Parameters") or {}
+    child_arn = args.get("StateMachineArn")
+    if not isinstance(child_arn, str) or not child_arn or child_arn.lstrip().startswith("{%"):
+        return []
+    return [child_arn]
 
 
 def _state_transitions(config: dict) -> List[str]:
