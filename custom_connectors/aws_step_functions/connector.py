@@ -16,8 +16,14 @@ Auth is standard AWS: a boto3 ``stepfunctions`` client built from the
 credentials in ``connect_args``. ``region_name`` is always required (Step
 Functions is regional); how the client authenticates depends on where the
 agent runs — default credential chain (instance/task role), assume-role with
-auto-refreshing STS credentials (``role_arn``), or a static IAM user key. See
-``README.md`` for the credentials-by-deployment-mode matrix and IAM policies.
+auto-refreshing STS credentials (``role_arn`` + optional ``external_id``), or a
+static IAM user key (``aws_access_key_id``/``aws_secret_access_key``, plus
+``aws_session_token`` for temporary keys).
+
+The identity needs these read-only actions (or the managed
+``AWSStepFunctionsReadOnlyAccess`` policy): ``states:ListStateMachines``,
+``states:DescribeStateMachine``, ``states:ListExecutions``,
+``states:DescribeExecution``, ``states:GetExecutionHistory``.
 
 Notes / limitations:
 
@@ -39,7 +45,8 @@ Notes / limitations:
   carrying ``mcd_job_id`` set to this connector's ``job_source_id`` (the
   ``stateMachineArn``), optionally ``mcd_task_id`` (a state name, i.e. a
   task's ``task_source_id``) and ``mcd_resource_id`` (the connection's
-  resource UUID). See the repo README "lineage via SQL query tagging".
+  resource UUID). Monte Carlo ingests these tags via its warehouse query-log
+  collection and resolves them back to the jobs/tasks this connector reports.
 """
 
 from __future__ import annotations
@@ -68,23 +75,35 @@ _TERMINAL_STATUSES = frozenset({"SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"})
 # (validators require one for those that normalize to failed/error).
 _FAILURE_STATUSES = frozenset({"FAILED", "TIMED_OUT", "ABORTED"})
 
-# History event detail keys that carry an error/cause for a failed step or run.
+# History event detail keys that carry an {error, cause} for a failed step —
+# used to attribute an error to a leftover (entered-but-never-exited) task run.
+# Covers the fail/timeout/start/submit/schedule shapes across task, Lambda, and
+# activity states, plus the execution- and map-run-level failures.
 _FAIL_DETAIL_KEYS = (
     "taskFailedEventDetails",
+    "taskTimedOutEventDetails",
+    "taskStartFailedEventDetails",
+    "taskSubmitFailedEventDetails",
     "lambdaFunctionFailedEventDetails",
+    "lambdaFunctionTimedOutEventDetails",
+    "lambdaFunctionStartFailedEventDetails",
+    "lambdaFunctionScheduleFailedEventDetails",
     "activityFailedEventDetails",
+    "activityTimedOutEventDetails",
+    "activityScheduleFailedEventDetails",
     "mapRunFailedEventDetails",
-    "executionFailedEventDetails",
-)
-# Execution-level failure detail keys, checked when building the run error.
-_EXECUTION_FAIL_DETAIL_KEYS = (
     "executionFailedEventDetails",
     "executionAbortedEventDetails",
     "executionTimedOutEventDetails",
 )
 
 # Cap history pagination so a Map state with many iterations can't fan out an
-# unbounded number of calls when reconstructing task runs.
+# unbounded number of calls when reconstructing task runs. The trade-off: on a
+# larger history the tail is dropped, so states entered before the cut but
+# exited after it are unobservable — ``_task_runs_from_history`` therefore
+# skips leftover synthesis when the history is truncated (see there), and the
+# run-level error is sourced from ``describe_execution`` rather than the
+# (possibly truncated) history.
 _MAX_HISTORY_EVENTS = 10000
 _HISTORY_PAGE_SIZE = 1000
 
@@ -319,9 +338,10 @@ class Connector:
     def _build_run_event(self, execution: dict) -> Optional[dict]:
         """Convert an execution (list item or describe result) into an EtlRunEvent.
 
-        ``describe_execution`` results carry ``error``/``cause``; list items do
-        not, so for those the error is reconstructed from the execution history
-        (which is fetched anyway for ``task_runs``).
+        ``describe_execution`` results carry ``error``/``cause`` directly; list
+        items (polling) don't, so for those the error is fetched from
+        ``describe_execution`` — authoritative and unaffected by history
+        truncation (see :meth:`_run_error`).
         """
         arn = execution.get("executionArn")
         job_source_id = execution.get("stateMachineArn")
@@ -349,16 +369,38 @@ class Connector:
         }
 
         history = self._execution_history(arn)
+        truncated = len(history) >= _MAX_HISTORY_EVENTS
         task_runs = _task_runs_from_history(
-            history, job_source_id, arn, raw_status, end_time
+            history, job_source_id, arn, raw_status, end_time, truncated
         )
         if task_runs:
             event["task_runs"] = task_runs
 
         if raw_status in _FAILURE_STATUSES:
-            event["error"] = _execution_error(execution, history, raw_status)
+            event["error"] = self._run_error(execution, raw_status)
 
         return _compact(event)
+
+    def _run_error(self, execution: dict, raw_status: str) -> dict:
+        """Build the ``error`` dict for a failed run.
+
+        Uses the ``error``/``cause`` already on a ``describe_execution`` result
+        (webhook mode); for polling list items, which omit them, calls
+        ``describe_execution`` — authoritative and truncation-proof, unlike
+        scanning the history tail.
+        """
+        error_name = execution.get("error")
+        cause = execution.get("cause")
+        if not error_name and not cause:
+            try:
+                detail = self.client.describe_execution(
+                    executionArn=execution["executionArn"]
+                )
+                error_name = detail.get("error")
+                cause = detail.get("cause")
+            except ClientError:
+                pass
+        return _error_dict(error_name, cause, raw_status)
 
     def _execution_history(self, execution_arn: str) -> List[dict]:
         """Fetch an execution's history events (chronological), best-effort."""
@@ -484,7 +526,13 @@ def _triggered_job_source_ids(config: dict) -> List[str]:
     ):
         return []
     # JSONata task inputs live under "Arguments"; JSONPath ones under "Parameters".
-    args = config.get("Arguments") or config.get("Parameters") or {}
+    # "Arguments" may also be a JSONata string expression (not a dict), in which
+    # case there's no static ARN to read.
+    args = config.get("Arguments")
+    if not isinstance(args, dict):
+        args = config.get("Parameters")
+    if not isinstance(args, dict):
+        return []
     child_arn = args.get("StateMachineArn")
     if not isinstance(child_arn, str) or not child_arn or child_arn.lstrip().startswith("{%"):
         return []
@@ -513,26 +561,30 @@ def _task_runs_from_history(
     run_arn: str,
     exec_status: str,
     run_end: Optional[str],
+    truncated: bool,
 ) -> List[dict]:
     """Reconstruct per-state task runs from an execution's history events.
 
     Every state emits a ``*StateEntered`` event (start) and, on normal
-    completion, a ``*StateExited`` event (end). A state that fails is entered
-    but never exited; such leftovers are resolved from the overall execution
-    status (failed → FAILED with the run's error, running → RUNNING, otherwise
-    SUCCEEDED). Task statuses reuse the vendor vocabulary so ``run_status_mapping``
-    covers them without a separate task mapping.
+    completion, a ``*StateExited`` event (end). Each run is keyed by its
+    ``StateEntered`` event ``id`` — unique and immutable within the execution —
+    so a task keeps the same ``run_source_id`` across re-collections of the same
+    run (webhook re-describe, overlapping windows, RUNNING → terminal).
 
-    Map iterations and Parallel branches re-enter the *same* inner state names
-    many times within one execution, so starts are tracked as a FIFO queue per
-    name (not a single value): each exit pairs with the oldest still-open start
-    of that name, and any still-open starts become leftover task runs. This
-    yields one task run per iteration with correct timing instead of collapsing
-    them into one.
+    Map iterations and Parallel branches re-enter the *same* state names, so
+    starts are tracked as a FIFO queue per name; each exit pairs with the oldest
+    still-open start of that name. Task statuses reuse the vendor vocabulary so
+    ``run_status_mapping`` covers them without a separate task mapping.
+
+    A state entered but never exited is a *leftover*, resolved from the overall
+    execution status (failed → FAILED with the run's error, running → RUNNING,
+    otherwise SUCCEEDED). Leftover synthesis is skipped when ``truncated`` is set:
+    a dropped history tail makes "not observed exiting" indistinguishable from
+    "still open", so synthesizing would fabricate FAILED/durations for states
+    that actually completed past the cut.
     """
-    open_states: dict[str, List[Optional[str]]] = {}
+    open_states: dict[str, List[tuple]] = {}
     runs: List[dict] = []
-    seq = 0
     last_fail: tuple = (None, None)
 
     for event in history:
@@ -541,15 +593,17 @@ def _task_runs_from_history(
         exited = event.get("stateExitedEventDetails")
 
         if entered and entered.get("name"):
-            open_states.setdefault(entered["name"], []).append(timestamp)
+            open_states.setdefault(entered["name"], []).append(
+                (event.get("id"), timestamp)
+            )
             continue
         if exited and exited.get("name"):
             name = exited["name"]
             starts = open_states.get(name)
-            start = starts.pop(0) if starts else None
-            seq += 1
+            event_id, start = starts.pop(0) if starts else (event.get("id"), None)
+            last_fail = (None, None)  # a clean exit clears any recovered failure
             runs.append(
-                _task_run(job_source_id, run_arn, seq, name, "SUCCEEDED", start, timestamp)
+                _task_run(job_source_id, run_arn, event_id, name, "SUCCEEDED", start, timestamp)
             )
             continue
         for key in _FAIL_DETAIL_KEYS:
@@ -558,26 +612,30 @@ def _task_runs_from_history(
                 last_fail = (detail.get("error"), detail.get("cause"))
                 break
 
+    if truncated:
+        # History tail dropped — a leftover may simply be an un-fetched exit, so
+        # emit only the state pairs actually observed exiting above.
+        return runs
+
     # States entered but never exited — resolve from the execution outcome.
     for name, starts in open_states.items():
-        for start in starts:
-            seq += 1
+        for event_id, start in starts:
             if exec_status in _FAILURE_STATUSES:
                 error = _error_dict(last_fail[0], last_fail[1], exec_status)
                 runs.append(
                     _task_run(
-                        job_source_id, run_arn, seq, name, "FAILED",
+                        job_source_id, run_arn, event_id, name, "FAILED",
                         start, run_end or start, error=error,
                     )
                 )
             elif exec_status == "RUNNING":
                 runs.append(
-                    _task_run(job_source_id, run_arn, seq, name, "RUNNING", start, None)
+                    _task_run(job_source_id, run_arn, event_id, name, "RUNNING", start, None)
                 )
             else:
                 runs.append(
                     _task_run(
-                        job_source_id, run_arn, seq, name, "SUCCEEDED", start, run_end or start
+                        job_source_id, run_arn, event_id, name, "SUCCEEDED", start, run_end or start
                     )
                 )
     return runs
@@ -586,17 +644,17 @@ def _task_runs_from_history(
 def _task_run(
     job_source_id: str,
     run_arn: str,
-    seq: int,
+    event_id,
     name: str,
     status: str,
     start: Optional[str],
     end: Optional[str],
     error: Optional[dict] = None,
 ) -> dict:
-    """Build a nested task-run event dict."""
+    """Build a nested task-run event dict, keyed by the state's history event id."""
     task_run = {
         "job_source_id": job_source_id,
-        "run_source_id": f"{run_arn}#{seq}",
+        "run_source_id": f"{run_arn}#{event_id}",
         "task_source_id": name,
         "name": name,
         "status": status,
@@ -607,28 +665,6 @@ def _task_run(
     if error:
         task_run["error"] = error
     return _compact(task_run)
-
-
-def _execution_error(execution: dict, history: List[dict], raw_status: str) -> dict:
-    """Build the ``error`` dict for a failed run.
-
-    Prefers the ``error``/``cause`` on a ``describe_execution`` result; falls
-    back to the execution-level failure event in the history (list items don't
-    carry error details).
-    """
-    error_name = execution.get("error")
-    cause = execution.get("cause")
-    if not error_name and not cause:
-        for event in reversed(history):
-            for key in _EXECUTION_FAIL_DETAIL_KEYS:
-                detail = event.get(key)
-                if detail:
-                    error_name = error_name or detail.get("error")
-                    cause = cause or detail.get("cause")
-                    break
-            if error_name or cause:
-                break
-    return _error_dict(error_name, cause, raw_status)
 
 
 def _error_dict(
