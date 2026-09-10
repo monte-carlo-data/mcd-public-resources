@@ -1,11 +1,13 @@
-# Docker Compose + MinIO
+# Docker Compose + MinIO, authenticating with OAuth
 
-Deploy the Monte Carlo Generic Agent with [Docker Compose](https://docs.docker.com/compose/) using [MinIO](https://min.io/) for S3-compatible object storage.
+Deploy the Monte Carlo Generic Agent with [Docker Compose](https://docs.docker.com/compose/) using [MinIO](https://min.io/) for S3-compatible object storage, authenticating to Monte Carlo with an OAuth client instead of a key/token pair.
+
+The agent exchanges the client id and secret for short-lived access tokens on its own (`client_credentials` grant). Everything else matches the [key/token example](../minio/README.md).
 
 ## Prerequisites
 
 1. [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed.
-2. An agent token (`mcd_id` and `mcd_token`) from Monte Carlo — see [Create and Register a Generic Agent](https://docs.getmontecarlo.com/docs/generic-agent-platforms). To authenticate with an OAuth client instead, use the [minio-oauth](../minio-oauth/README.md) example.
+2. An OAuth client for the agent (`client_id` and `client_secret`) from Monte Carlo — see [Create and Register a Generic Agent](https://docs.getmontecarlo.com/docs/generic-agent-platforms).
 
 ## Quick Start
 
@@ -19,24 +21,26 @@ cp .env.example .env
 
 Edit `.env` and set:
 
-- `BACKEND_SERVICE_URL` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**.
+- `BACKEND_SERVICE_URL` — in the Monte Carlo app, go to **Account Information > Agent Service** and copy the **Public endpoint**. The agent derives the OAuth token endpoint from it.
 - `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` — credentials for MinIO.
 
-Optionally set `AGENT_IMAGE_TAG` to pin the agent image to a specific version (e.g. `0.0.8-generic`). If unset, defaults to `latest-generic`.
+Optionally set `AGENT_IMAGE_TAG` to pin the agent image to a specific version (e.g. `0.0.8-generic`). If unset, defaults to `latest-generic`. Optionally set `MCD_OAUTH_TOKEN_ENDPOINT` to override the derived token endpoint; a standard deployment does not need it.
 
 Docker Compose automatically reads `.env` when you start the stack.
 
-### 2. Create the token file
+### 2. Create the credentials file
 
-[Register a new Generic Agent](https://docs.getmontecarlo.com/docs/generic-agent-platforms) in Monte Carlo and generate a key to obtain your `mcd_id` and `mcd_token`, then:
+Create an OAuth client for your generic agent in Monte Carlo to obtain your `client_id` and `client_secret`, then:
 
 ```bash
 mkdir -p secrets/integrations
-cat > secrets/token.json << 'EOF'
-{"mcd_id": "<YOUR_MCD_ID>", "mcd_token": "<YOUR_MCD_TOKEN>"}
+cat > secrets/oauth.json << 'EOF'
+{"client_id": "<YOUR_CLIENT_ID>", "client_secret": "<YOUR_CLIENT_SECRET>"}
 EOF
-chmod 600 secrets/token.json
+chmod 600 secrets/oauth.json
 ```
+
+The file is mounted read-only at `/etc/secrets/mcd-oauth/credentials.json`, the same path the Helm chart uses.
 
 ### 3. Start all services
 
@@ -48,11 +52,13 @@ This starts MinIO, automatically creates the storage bucket, and launches the ag
 
 ### 4. Verify
 
-Check that the agent is running:
+Check that the agent is running and authenticating with OAuth:
 
 ```bash
 docker compose logs -f mcd-agent
 ```
+
+The log shows `Using OAuth client_credentials authentication` followed by the token endpoint, then `welcome: agent_id=...` once the backend accepts the client.
 
 Test that the agent can communicate with the Monte Carlo platform:
 
@@ -65,6 +71,16 @@ A successful response contains `"ok": true`.
 You can also browse the MinIO Console at http://localhost:9001 (log in with your configured `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`) to inspect the storage bucket.
 
 > **Note:** MinIO with default credentials is suitable for development and testing only. For production deployments, configure MinIO with proper credentials and TLS, or use a cloud-native storage service.
+
+## Rotating the client secret
+
+Write the new secret into `secrets/oauth.json` and restart the agent:
+
+```bash
+docker compose restart mcd-agent
+```
+
+Access tokens the agent already holds stay valid until they expire.
 
 ## Adding Integration Credentials
 
