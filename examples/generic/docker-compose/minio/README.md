@@ -5,7 +5,7 @@ Deploy the Monte Carlo Generic Agent with [Docker Compose](https://docs.docker.c
 ## Prerequisites
 
 1. [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/) installed.
-2. An agent token (`mcd_id` and `mcd_token`) from Monte Carlo — see [Create and Register a Generic Agent](https://docs.getmontecarlo.com/docs/generic-agent-platforms).
+2. An agent token (`mcd_id` and `mcd_token`) from Monte Carlo — see [Create and Register a Generic Agent](https://docs.getmontecarlo.com/docs/generic-agent-platforms). To authenticate with an OAuth client instead, use the [minio-oauth](../minio-oauth/README.md) example.
 
 ## Quick Start
 
