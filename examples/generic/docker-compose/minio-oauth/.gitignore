@@ -1,0 +1,6 @@
+.env
+secrets/*
+!secrets/*.example
+!secrets/integrations/
+secrets/integrations/*
+!secrets/integrations/*.example
