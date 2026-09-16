@@ -143,9 +143,6 @@ class Connector:
         # assets this connector actually emits.
         self._qri_index: Dict[str, str] = {}
 
-        # Fail fast on bad credentials, a wrong tenant URL, or a missing scope.
-        self._get(f"{self._base}/api/v1/items", params={"limit": 1})
-
     def close_connection(self) -> None:
         """Close the HTTP session."""
         session = getattr(self, "_session", None)
