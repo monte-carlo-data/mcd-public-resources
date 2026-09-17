@@ -38,3 +38,11 @@ terraform.rc
 /.venv/
 
 .terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+
+# Local connector credentials — never commit; examples ship credentials_example.json
+custom_connectors/*/credentials.json
+custom_connectors/*/.env

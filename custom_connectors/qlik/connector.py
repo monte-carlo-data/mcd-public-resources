@@ -20,24 +20,32 @@ then slices that list. Cursors are opaque, so this is the only way to honor an
 ``(limit, offset)`` contract consistently.
 
 **Lineage.** Both BI-to-BI edges and warehouse ``inputs`` come from one
-``GET /api/v1/lineage-graphs/nodes/{qri}`` call per asset: upstream ``DATASET``
-nodes become ``DERIVES_FROM`` refs (matched back to emitted assets by QRI), and
-upstream ``TABLE`` nodes become ``inputs``. Two caveats, both documented in
-README.md:
+``GET /api/v1/lineage-graphs/nodes/{qri}`` call per asset: upstream nodes whose
+QRI addresses another BI asset (``qri:app:*`` for apps and data flows,
+``qri:qdf:*`` for datasets) become ``DERIVES_FROM`` refs, and upstream ``TABLE``
+nodes become ``inputs``. Two caveats:
 
-- That endpoint is rate-limited to **20 requests/minute** — far tighter than
-  the 1000/min the catalog reads get — so lineage is resolved only for assets
-  on the requested page, and can be switched off entirely with the
-  ``collect_lineage`` credential.
+- **The lineage endpoint is rate-limited to ~20 requests/minute** — far tighter
+  than the 1000/min the catalog reads get. In-agent lineage is therefore
+  resolved only for the assets on each collected page and is practical for
+  small tenants only; a page of 100 assets already costs ~5 minutes of wall
+  clock. For larger tenants, either set ``collect_lineage: false`` and run the
+  companion ``push_events.py`` script (which paces the same calls under the
+  limit and pushes the results via Monte Carlo's BI Push Ingest API), or use
+  SQL query tagging. Both alternatives are documented in the Monte Carlo docs
+  page for this example.
 - Qlik lineage nodes carry a ``label`` and an optional ``filePath``, but no
   documented database/schema attributes. Table names therefore arrive
-  **unqualified**, and Monte Carlo may only partially match them. Where exact
-  lineage matters, prefer SQL query tagging.
+  **unqualified** unless the source is a registered data connection, and Monte
+  Carlo may only partially match them. Where exact lineage matters, prefer SQL
+  query tagging.
 
 **Auth** is either a tenant API key or an OAuth2 M2M client-credentials pair.
 Neither is least-privilege: an API key inherits *all* permissions of the user
-who minted it, and an M2M OAuth client is granted Tenant Admin by default. See
-README.md for how to scope one down.
+who minted it, and an M2M OAuth client is granted Tenant Admin by default —
+scope the identity down when you create it. See the Monte Carlo docs page for
+this example for the full setup walkthrough (including the Trusted-consent and
+space-membership steps the M2M path requires).
 """
 
 from __future__ import annotations
@@ -51,6 +59,10 @@ import requests
 
 # Qlik's catalog page ceiling; requesting more is rejected.
 _PAGE_SIZE = 100
+
+# Backstop on cursor-following: far above any real catalog depth, but stops a
+# server that never terminates ``links.next`` from looping forever.
+_MAX_PAGES = 10000
 
 _TOKEN_EXPIRY_SKEW_SECONDS = 60
 
@@ -139,8 +151,8 @@ class Connector:
         # Built once and sliced across pages so paging stays consistent for
         # the life of the connector session.
         self._stubs: Optional[List[dict]] = None
-        # dataset QRI -> asset_source_id, for matching lineage nodes back to
-        # assets this connector actually emits.
+        # asset_source_id and full lineage QRI -> asset_source_id, for matching
+        # upstream lineage nodes back to assets this connector actually emits.
         self._qri_index: Dict[str, str] = {}
 
     def close_connection(self) -> None:
@@ -206,11 +218,15 @@ class Connector:
         """Walk a cursor-paginated collection, returning every ``data`` entry.
 
         The ``links.next.href`` cursor already carries the original query
-        string, so ``params`` is applied to the first request only.
+        string, so ``params`` is applied to the first request only. Guards
+        against a server that echoes ``links.next`` on the final page (a common
+        REST quirk) by stopping on a repeated URL, with a page-count backstop.
         """
         url: Optional[str] = f"{self._base}{path}"
         results: List[dict] = []
-        while url:
+        seen = set()
+        while url and url not in seen and len(seen) < _MAX_PAGES:
+            seen.add(url)
             body = self._get(url, params=params)
             params = None
             results.extend(body.get("data") or [])
@@ -256,10 +272,17 @@ class Connector:
         stubs = [self._stub(item) for item in items]
         stubs = [stub for stub in stubs if stub is not None]
 
-        # Index every emitted asset by resource id so an upstream lineage node
-        # (whose QRI embeds that id) can be matched back to an asset_source_id.
-        # Refs to anything absent here are dropped rather than emitted dangling.
-        self._qri_index = {stub["asset_source_id"]: stub["asset_source_id"] for stub in stubs}
+        # Index every emitted asset two ways so an upstream lineage node can be
+        # matched back to an asset_source_id regardless of QRI form: by
+        # resource id (matches `qri:app:*`, where the id is the QRI's path) and
+        # by full QRI (matches `qri:qdf:*`, whose space-scoped secureQri does
+        # not embed the bare resource id). Refs absent from the index are
+        # dropped rather than emitted dangling.
+        self._qri_index = {}
+        for stub in stubs:
+            self._qri_index[stub["asset_source_id"]] = stub["asset_source_id"]
+            if stub.get("_qri"):
+                self._qri_index[stub["_qri"]] = stub["asset_source_id"]
 
         return sorted(stubs, key=lambda a: (a["asset_type"], a["asset_source_id"]))
 
@@ -400,14 +423,18 @@ class Connector:
             if node_qri == qri or (node_qri or "").startswith(qri + "#"):
                 continue
             node_type = metadata.get("type")
-            # The asset an app/qdf QRI points at is identified by the resource
-            # id between the scheme and the "#<hash>" suffix.
+            # Match the node to an emitted asset by full QRI first (a qdf
+            # dataset's space-scoped secureQri), then by the resource id an
+            # app/qdf QRI embeds between the scheme and the "#<hash>" suffix.
             ref_id = _qri_resource_id(node_qri)
             is_bi_asset = ref_id is not None and _qri_scheme(node_qri) in _BI_ASSET_QRI_SCHEMES
+            target = self._qri_index.get((node_qri or "").split("#", 1)[0]) or (
+                self._qri_index.get(ref_id) if ref_id else None
+            )
 
-            if is_bi_asset and ref_id in self._qri_index:
-                upstream[ref_id] = {
-                    "asset_source_id": ref_id,
+            if is_bi_asset and target:
+                upstream[target] = {
+                    "asset_source_id": target,
                     "relationship_type": "DERIVES_FROM",
                 }
             elif node_type == _NODE_TYPE_TABLE and not is_bi_asset:
@@ -572,4 +599,3 @@ def _strip_identifier_quotes(name: Optional[str]) -> Optional[str]:
     parts = [part.strip().strip('"').strip("`") for part in name.split(".")]
     cleaned = ".".join(part for part in parts if part)
     return cleaned or None
-
