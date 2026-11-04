@@ -19,10 +19,10 @@ matching keep alerting. Run one of these scripts once a day to refresh the list:
 
 Both scripts share [job_monitor_sync.py](job_monitor_sync.py), so keep the three files together.
 
-> **The scripts replace the monitor's whole table list.** Any table you added to the list by
-> hand is removed if it isn't in scope. Every other setting (job filters, table exclusions,
-> audiences, alert conditions, tags, and so on) is read from the monitor and written back
-> unchanged.
+> **The scripts own the monitor's table filters.** They replace the whole list, so any table you
+> added by hand is removed if it isn't in scope. Every other setting (job filters, table
+> exclusions, audiences, alert conditions, tags, and so on) is read from the monitor and written
+> back unchanged.
 
 ## Installation
 
@@ -122,9 +122,12 @@ Example marketing job monitor: 7 tables in scope (0 added, 0 removed).
 Schedule the script once a day with cron or your scheduler, for example:
 
 ```
-0 6 * * * cd /path/to/job_monitors && MCD_DEFAULT_API_ID=... MCD_DEFAULT_API_TOKEN=... \
-  /path/to/venv/bin/python sync_pattern_tables.py --config /path/to/pattern_monitors.yaml
+0 6 * * * cd /path/to/job_monitors && /path/to/venv/bin/python sync_pattern_tables.py \
+  --profile <name> --config /path/to/pattern_monitors.yaml
 ```
+
+Don't put the API token in the crontab. Use a profile in `~/.mcd/profiles.ini`, or set
+`MCD_DEFAULT_API_ID` and `MCD_DEFAULT_API_TOKEN` from your scheduler's secret store.
 
 A monitor is only saved when its table list changed.
 
@@ -134,8 +137,11 @@ The script leaves a monitor unchanged, prints why, and keeps going with the othe
 
 - no job monitor, or more than one, has that name;
 - the monitor is managed by monitors-as-code (update its table list there instead);
+- its table filters aren't a plain list of tables (for example a database or schema filter, a
+  negated table, or an AND joiner), which the script can't rewrite without changing what they mean;
 - no warehouse is found for the monitor's dbt connection;
-- no table matches its scope (an empty table list would make the monitor alert on every table).
+- no table matches its scope (an empty table list would make the monitor alert on every table);
+- Monte Carlo returns an error for it (for example, it rejects the update).
 
 If any monitor was left unchanged, the script exits with a nonzero status, so your scheduler can
 flag the run.

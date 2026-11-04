@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import requests
 import yaml
+from pycarlo.common.errors import GqlError
 from pycarlo.core import Client, Session
 
 PAGE_SIZE = 1000
@@ -244,7 +246,11 @@ def table_filter_input(row: Any) -> dict[str, Any]:
 
 
 def update_variables(monitor: Any, tables: list[str], dry_run: bool) -> dict[str, Any]:
-    """The monitor's current settings, with its table list replaced by ``tables``."""
+    """The monitor's current settings, with its table list replaced by ``tables``.
+
+    Every UPDATE_JOB_MONITOR variable must be filled here from GET_JOB_MONITOR, or the full
+    upsert resets that setting.
+    """
     selection = monitor.asset_selection
     grouping = monitor.alert_grouping
     return {
@@ -306,6 +312,13 @@ def refresh(
     monitor = client(GET_JOB_MONITOR, variables={"uuid": matches[0]}).get_job_monitor
     if monitor.is_template_managed:
         raise SkipMonitor("managed by monitors-as-code; update its table list there instead")
+    selection = monitor.asset_selection
+    filters = selection.table_filters
+    # The joiner only matters with two or more filters.
+    if any(r.type != "FULL_TABLE_ID" or r.negated for r in filters) or (
+        len(filters) > 1 and selection.table_filters_joiner != "OR"
+    ):
+        raise SkipMonitor("its table filters are not a plain list of tables; update them by hand")
     dw_id = warehouses.get(str(monitor.integration_uuid))
     if dw_id is None:
         raise SkipMonitor(f"no warehouse found for dbt connection {monitor.integration_uuid}")
@@ -314,11 +327,7 @@ def refresh(
         # An empty table list would match every table, so the monitor would alert on all of them.
         raise SkipMonitor("no table on its warehouse matches its scope")
 
-    current = {
-        r.full_table_id
-        for r in monitor.asset_selection.table_filters
-        if hasattr(r, "full_table_id")
-    }
+    current = {r.full_table_id for r in filters}
     added, removed = sorted(set(tables) - current), sorted(current - set(tables))
     print(f"{name}: {len(tables)} tables in scope ({len(added)} added, {len(removed)} removed).")
     for table in added:
@@ -343,6 +352,9 @@ def sync(client: Client, scopes: dict[str, Scope], dry_run: bool) -> list[str]:
             refresh(client, name, scope, uuids, warehouses, cache, dry_run)
         except SkipMonitor as error:
             print(f"{name}: left unchanged, {error}.")
+            failed.append(name)
+        except (GqlError, requests.RequestException) as error:
+            print(f"{name}: left unchanged, Monte Carlo returned an error: {error}.")
             failed.append(name)
     return failed
 

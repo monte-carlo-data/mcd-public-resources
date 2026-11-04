@@ -4,13 +4,16 @@ Run:  pytest test_job_monitor_sync.py -v
 """
 
 import copy
+import re
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
+import requests
 from box import Box
+from pycarlo.common.errors import GqlError
 
 import job_monitor_sync as sut
 import sync_key_asset_tables
@@ -167,31 +170,48 @@ class TestSync:
 
         (update,) = client.updates
         assert table_ids(update) == ["db:a.kept", "db:a.new"]
-        assert update["dryRun"] is False
-        assert update["uuid"] == "m1"
-        assert update["description"] == "Monitor"
-        assert update["notes"] == "some notes"
-        assert update["priority"] == "P2"
-        assert update["integrationUuid"] == INTEGRATION
-        assert update["alertConditions"] == [{"condition": "FAILURE"}]
-        assert update["alertGrouping"] == {
-            "mode": "BY_JOB",
-            "maxHours": 6,
-            "renotifyEveryHours": None,
+        assert update == {
+            "uuid": "m1",
+            "description": "Monitor",
+            "integrationType": "DBT",
+            "integrationUuid": INTEGRATION,
+            "alertConditions": [{"condition": "FAILURE"}],
+            "assetSelection": {
+                "filters": [
+                    {
+                        "type": "JOB_TAG",
+                        "negated": False,
+                        "jobTags": ["nightly"],
+                        "jobTagsOperator": "OR",
+                    }
+                ],
+                "filtersJoiner": "AND",
+                "exclusions": [],
+                "exclusionsJoiner": "OR",
+                "tableFilters": [
+                    {"type": "FULL_TABLE_ID", "fullTableId": "db:a.kept"},
+                    {"type": "FULL_TABLE_ID", "fullTableId": "db:a.new"},
+                ],
+                "tableFiltersJoiner": "OR",
+                "tableExclusions": [
+                    {"type": "SCHEMA", "negated": False, "database": "db", "schemas": ["tmp"]}
+                ],
+                "tableExclusionsJoiner": "OR",
+            },
+            "jobMcons": [],
+            "notes": "some notes",
+            "priority": "P2",
+            "alertGrouping": {"mode": "BY_JOB", "maxHours": 6, "renotifyEveryHours": None},
+            "audiences": ["data-team"],
+            "audienceConditions": [{"audience": "data-team", "triagePriority": ["P1", "P2"]}],
+            "failureAudiences": [],
+            "domainRestrictions": ["33333333-3333-3333-3333-333333333333"],
+            "tags": [{"name": "team", "value": "data"}],
+            "dataQualityDimension": None,
+            "isDraft": False,
+            "autoTriage": True,
+            "dryRun": False,
         }
-        assert update["assetSelection"]["filters"] == [
-            {"type": "JOB_TAG", "negated": False, "jobTags": ["nightly"], "jobTagsOperator": "OR"}
-        ]
-        assert update["assetSelection"]["filtersJoiner"] == "AND"
-        assert update["assetSelection"]["tableExclusions"] == [
-            {"type": "SCHEMA", "negated": False, "database": "db", "schemas": ["tmp"]}
-        ]
-        assert update["audienceConditions"] == [
-            {"audience": "data-team", "triagePriority": ["P1", "P2"]}
-        ]
-        assert update["domainRestrictions"] == ["33333333-3333-3333-3333-333333333333"]
-        assert update["tags"] == [{"name": "team", "value": "data"}]
-        assert update["autoTriage"] is True
         out = capsys.readouterr().out
         assert "Monitor: 2 tables in scope (1 added, 1 removed)." in out
         assert "  + db:a.new" in out
@@ -285,6 +305,129 @@ class TestSync:
 
         assert failed == ["Managed"]
         assert [u["uuid"] for u in client.updates] == ["m2"]
+
+    def test_schema_table_filter_is_skipped(self, capsys):
+        monitor = job_monitor("m1", "Monitor", ["db:a.old"])
+        monitor["assetSelection"]["tableFilters"].insert(
+            0, {"type": "SCHEMA", "negated": False, "database": "db", "schemas": ["a"]}
+        )
+        client = FakeClient([monitor], [table("db:a.new", True)])
+
+        assert sut.sync(client, {"Monitor": KEY_ASSETS}, dry_run=False) == ["Monitor"]
+
+        assert client.updates == []
+        assert "table filters" in capsys.readouterr().out
+
+    def test_negated_table_filter_is_skipped(self, capsys):
+        monitor = job_monitor("m1", "Monitor", ["db:a.t2"])
+        monitor["assetSelection"]["tableFilters"].append(
+            {"type": "FULL_TABLE_ID", "negated": True, "fullTableId": "db:a.t1"}
+        )
+        client = FakeClient([monitor], [table("db:a.t1", True), table("db:a.t2", True)])
+
+        assert sut.sync(client, {"Monitor": KEY_ASSETS}, dry_run=False) == ["Monitor"]
+
+        assert client.updates == []
+        assert "table filters" in capsys.readouterr().out
+
+    def test_and_table_filters_joiner_is_skipped(self, capsys):
+        monitor = job_monitor("m1", "Monitor", ["db:a.t1", "db:a.t2"])
+        monitor["assetSelection"]["tableFiltersJoiner"] = "AND"
+        client = FakeClient([monitor], [table(f"db:a.t{i}", True) for i in (1, 2, 3)])
+
+        assert sut.sync(client, {"Monitor": KEY_ASSETS}, dry_run=False) == ["Monitor"]
+
+        assert client.updates == []
+        assert "table filters" in capsys.readouterr().out
+
+    def test_joiner_is_ignored_with_a_single_table_filter(self):
+        monitor = job_monitor("m1", "Monitor", ["db:a.t1"])
+        monitor["assetSelection"]["tableFiltersJoiner"] = "AND"
+        client = FakeClient([monitor], [table("db:a.t1", True), table("db:a.t2", True)])
+
+        assert sut.sync(client, {"Monitor": KEY_ASSETS}, dry_run=False) == []
+
+        (update,) = client.updates
+        assert table_ids(update) == ["db:a.t1", "db:a.t2"]
+        assert update["assetSelection"]["tableFiltersJoiner"] == "OR"
+
+    def test_api_error_on_update_does_not_stop_the_others(self, capsys):
+        class RejectingClient(FakeClient):
+            def __call__(self, query, variables=None):
+                if "mutation UpdateJobMonitor(" in query and variables["uuid"] == "m1":
+                    raise GqlError(summary="rejected")
+                return super().__call__(query, variables)
+
+        client = RejectingClient(
+            [job_monitor("m1", "A", ["db:a.old"]), job_monitor("m2", "B", ["db:a.old"])],
+            [table("db:a.t1", True)],
+        )
+
+        failed = sut.sync(client, {"A": KEY_ASSETS, "B": KEY_ASSETS}, dry_run=False)
+
+        assert failed == ["A"]
+        assert [u["uuid"] for u in client.updates] == ["m2"]
+        assert "A: left unchanged, Monte Carlo returned an error: rejected." in (
+            capsys.readouterr().out
+        )
+
+    def test_connection_error_on_read_does_not_stop_the_others(self):
+        class FlakyClient(FakeClient):
+            failed_once = False
+
+            def __call__(self, query, variables=None):
+                if "query GetTables(" in query and not self.failed_once:
+                    self.failed_once = True
+                    raise requests.exceptions.ConnectionError("boom")
+                return super().__call__(query, variables)
+
+        client = FlakyClient(
+            [job_monitor("m1", "A", ["db:a.old"]), job_monitor("m2", "B", ["db:a.old"])],
+            [table("db:a.t1", True)],
+        )
+
+        failed = sut.sync(client, {"A": KEY_ASSETS, "B": KEY_ASSETS}, dry_run=False)
+
+        assert failed == ["A"]
+        assert [u["uuid"] for u in client.updates] == ["m2"]
+
+    @pytest.mark.parametrize(
+        "job_filter",
+        [
+            {"type": "JOB_TAG", "negated": False, "jobTags": ["nightly"], "jobTagsOperator": "OR"},
+            {
+                "type": "JOB_TAG_PAIR",
+                "negated": True,
+                "jobTagPairs": [{"name": "k", "value": "v"}],
+                "jobTagsOperator": "AND",
+            },
+            {"type": "JOB_MCON", "negated": False, "jobMcons": ["MCON++job"]},
+            {
+                "type": "DBT_PROJECT",
+                "negated": False,
+                "dbtProjectUuids": ["44444444-4444-4444-4444-444444444444"],
+            },
+        ],
+        ids=lambda f: f["type"],
+    )
+    def test_job_filters_round_trip(self, job_filter):
+        monitor = job_monitor("m1", "Monitor", ["db:a.old"])
+        monitor["assetSelection"]["filters"] = [job_filter]
+        monitor["assetSelection"]["exclusions"] = [job_filter]
+        client = FakeClient([monitor], [table("db:a.new", True)])
+
+        assert sut.sync(client, {"Monitor": KEY_ASSETS}, dry_run=False) == []
+
+        (update,) = client.updates
+        assert update["assetSelection"]["filters"] == [job_filter]
+        assert update["assetSelection"]["exclusions"] == [job_filter]
+
+    def test_update_variables_cover_every_mutation_variable(self):
+        header = sut.UPDATE_JOB_MONITOR.split("mutation UpdateJobMonitor(")[1].split(") {")[0]
+        declared = set(re.findall(r"\$(\w+):", header))
+        monitor = Box(job_monitor("m1", "Monitor", ["db:a.t1"]), camel_killer_box=True)
+
+        assert declared == set(sut.update_variables(monitor, ["db:a.t1"], False))
 
     def test_job_monitors_are_paged(self, monkeypatch):
         monkeypatch.setattr(sut, "PAGE_SIZE", 2)

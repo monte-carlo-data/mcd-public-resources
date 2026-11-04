@@ -11,7 +11,8 @@ legacy notification rules matched them), it is a key asset if ``key_assets_only`
 ``exclude`` matches neither. ``schemas``, if set, limits the tables read to those
 (database, schema) pairs, which is faster on large warehouses.
 
-The script replaces the monitor's whole table list and changes nothing else.
+The script replaces the monitor's whole table list and changes no other setting. It skips
+monitors whose table filters aren't a plain list of tables.
 
 Usage:
     python sync_pattern_tables.py --config pattern_monitors.yaml --dry-run
