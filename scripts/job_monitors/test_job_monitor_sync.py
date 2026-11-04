@@ -506,6 +506,20 @@ class TestScopedTables:
             ("raw", "finance"),
         }
 
+    def test_schema_with_no_tables_skips_rather_than_dropping_its_tables(self):
+        # A mis-cased pair reads nothing; the other pair still matches, so without this check
+        # the sync would silently remove the first schema's tables.
+        scope = Scope(include=r".*", schemas=(("analytics", "Finance"), ("raw", "finance")))
+
+        with pytest.raises(sut.SkipMonitor, match="no live tables in analytics:Finance"):
+            self.scoped(scope)
+
+    def test_schema_with_no_key_assets_skips(self):
+        scope = Scope(include=r".*", key_assets_only=True, schemas=(("raw", "finance"),))
+
+        with pytest.raises(sut.SkipMonitor, match="no live key assets in raw:finance"):
+            self.scoped(scope)
+
     def test_reads_are_cached_across_monitors_on_the_same_warehouse(self):
         client = FakeClient([], self.TABLES)
         cache: sut.TableCache = {}

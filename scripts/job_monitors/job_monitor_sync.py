@@ -212,6 +212,14 @@ def scoped_tables(client: Client, dw_id: str, scope: Scope, cache: TableCache) -
         key = (dw_id, scope.key_assets_only, schema)
         if key not in cache:
             cache[key] = warehouse_tables(client, dw_id, scope.key_assets_only, schema)
+        if schema is not None and not cache[key]:
+            # Usually a typo or case difference; the other pairs may still match, so without
+            # this the sync would silently drop this schema's tables.
+            kind = "key assets" if scope.key_assets_only else "tables"
+            raise SkipMonitor(
+                f"no live {kind} in {schema[0]}:{schema[1]}; check the database and schema in "
+                "'schemas', which must match exactly, including case"
+            )
         tables += cache[key]
 
     def matches(pattern: str, table: tuple[str, str]) -> bool:

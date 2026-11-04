@@ -60,8 +60,11 @@ monitors:
 Or pass them on the command line with `--monitor-name`, repeated for each monitor. Names from
 both are combined.
 
-The script uses the key-asset flag, not the importance score the legacy rule used. The two can
-differ, so review the first `--dry-run` before saving.
+The script uses the key-asset flag, not the importance score the legacy rule used. Neither script
+filters on a numeric importance score, so for a legacy rule with a score threshold (for example,
+a score of 0.75 or more), the key assets are a substitute, not the same set: they can include
+tables below the threshold or miss tables above it. Review the first `--dry-run` and check that
+the key assets match what the rule should cover before saving.
 
 ### Table patterns
 
@@ -84,7 +87,7 @@ monitors:
 | `include`         | yes      | A table is in scope when this regex matches the start of its full table id (for example `analytics:marketing.campaigns`) or its MCON, as legacy notification rules matched. |
 | `exclude`         | no       | Tables where this regex matches the full table id or MCON are left out.                                                                              |
 | `key_assets_only` | no       | Only include key assets. Defaults to `false`.                                                                                                        |
-| `schemas`         | no       | Only read tables from these (database, schema) pairs. Faster on large warehouses. List every pair that can hold a matching table, or matches elsewhere are dropped. |
+| `schemas`         | no       | Only read tables from these (database, schema) pairs. Faster on large warehouses. List every pair that can hold a matching table, or matches elsewhere are dropped. Names must match exactly, including case, as in the full table id: `analytics:marketing.campaigns` → `database: analytics`, `schema: marketing`. A pair with no live tables (or no key assets, with `key_assets_only`) skips the monitor. |
 
 Regexes use Python's [`re.match`](https://docs.python.org/3/library/re.html#re.match). Put them
 in single quotes in YAML so backslashes need no escaping.
@@ -145,6 +148,8 @@ The script leaves a monitor unchanged, prints why, and keeps going with the othe
 - its table filters aren't a plain list of tables (for example a database or schema filter, a
   negated table, or an AND joiner), which the script can't rewrite without changing what they mean;
 - no warehouse is found for the monitor's dbt connection;
+- a `schemas` pair has no live tables, which usually means a typo or a case difference (without
+  this check, that schema's tables would silently drop out of the list);
 - no table matches its scope (an empty table list would make the monitor alert on every table);
 - Monte Carlo returns an error for it (for example, it rejects the update).
 
@@ -153,9 +158,12 @@ flag the run.
 
 ## Development
 
+Run the tests before changing these scripts:
+
 ```
 pip install -r requirements-dev.txt
 pytest test_job_monitor_sync.py -v
 ```
 
-The tests mock all Monte Carlo API responses; they don't call Monte Carlo.
+The tests mock all Monte Carlo API responses; they don't call Monte Carlo. CircleCI also runs them
+on every push.
