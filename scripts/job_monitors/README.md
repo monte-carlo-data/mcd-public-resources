@@ -39,8 +39,13 @@ monitors.
 
 ## Configuration
 
-Monitors are found by their exact name in Monte Carlo. Keep your config file wherever suits your
-scheduler; it doesn't need to live in this directory. Config files are YAML (JSON also works).
+Monitors are found by their exact `name`, as the Monte Carlo API returns it (for example from
+`getMonitors`). For monitors created by the job monitor migration, the migration set this name.
+It is not the monitor's description, which is shown as its title, so check the name before
+running. A monitor created through the API or UI gets a generated name such as `rule_AbC123xy`.
+
+Keep your config file wherever suits your scheduler; it doesn't need to live in this directory.
+Config files are YAML (JSON also works).
 
 ### Key assets
 
@@ -48,8 +53,8 @@ List the monitor names in a config file (see [key_asset_monitors.example.yaml](k
 
 ```yaml
 monitors:
-  - "Example dbt job monitor"
-  - "Another example dbt job monitor"
+  - "example-dbt-job-monitor"
+  - "another-example-dbt-job-monitor"
 ```
 
 Or pass them on the command line with `--monitor-name`, repeated for each monitor. Names from
@@ -64,7 +69,7 @@ Give each monitor a scope (see [pattern_monitors.example.yaml](pattern_monitors.
 
 ```yaml
 monitors:
-  - name: "Example marketing job monitor"
+  - name: "example-marketing-job-monitor"
     include: '^analytics:marketing\.'
     exclude: '^analytics:marketing\.(tmp|scratch)_'
     key_assets_only: true
@@ -75,7 +80,7 @@ monitors:
 
 | Key               | Required | Meaning                                                                                                                                              |
 |-------------------|----------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `name`            | yes      | The job monitor's exact name.                                                                                                                        |
+| `name`            | yes      | The job monitor's exact `name` (see above), not its description.                                                                                     |
 | `include`         | yes      | A table is in scope when this regex matches the start of its full table id (for example `analytics:marketing.campaigns`) or its MCON, as legacy notification rules matched. |
 | `exclude`         | no       | Tables where this regex matches the full table id or MCON are left out.                                                                              |
 | `key_assets_only` | no       | Only include key assets. Defaults to `false`.                                                                                                        |
@@ -109,11 +114,11 @@ Other options:
 Example output:
 
 ```
-Example finance job monitor: 42 tables in scope (1 added, 1 removed).
+example-finance-job-monitor: 42 tables in scope (1 added, 1 removed).
   + analytics:finance.new_table
   - analytics:finance.dropped_table
   Saved.
-Example marketing job monitor: 7 tables in scope (0 added, 0 removed).
+example-marketing-job-monitor: 7 tables in scope (0 added, 0 removed).
   No change.
 ```
 

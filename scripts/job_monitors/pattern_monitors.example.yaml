@@ -7,12 +7,12 @@
 # Use single quotes around regexes so backslashes need no escaping.
 monitors:
   # Every table in one schema.
-  - name: "Example finance job monitor"
+  - name: "example-finance-job-monitor"
     include: '^analytics:finance\.'
 
   # Key assets in a schema, minus scratch tables. Reading only the listed schemas is faster on
   # large warehouses; list every (database, schema) pair that can hold a matching table.
-  - name: "Example marketing job monitor"
+  - name: "example-marketing-job-monitor"
     include: '^analytics:marketing\.'
     exclude: '^analytics:marketing\.(tmp|scratch)_'
     key_assets_only: true
@@ -21,7 +21,7 @@ monitors:
         schema: marketing
 
   # A few named tables across two schemas.
-  - name: "Example executive reporting job monitor"
+  - name: "example-executive-reporting-job-monitor"
     include: '^analytics:(sales\.daily_revenue|finance\.monthly_close)$'
     schemas:
       - database: analytics

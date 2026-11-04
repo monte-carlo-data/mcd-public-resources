@@ -14,7 +14,7 @@ monitors whose table filters aren't a plain list of tables.
 
 Usage:
     python sync_key_asset_tables.py --config key_asset_monitors.yaml --dry-run
-    python sync_key_asset_tables.py --monitor-name "My job monitor" --dry-run
+    python sync_key_asset_tables.py --monitor-name "my-job-monitor" --dry-run
 """
 
 import argparse
