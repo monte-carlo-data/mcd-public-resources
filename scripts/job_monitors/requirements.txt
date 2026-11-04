@@ -1,0 +1,2 @@
+pycarlo>=0.12
+PyYAML>=6.0

@@ -1,0 +1,30 @@
+# Job monitors whose table list should be the live tables that match a regex scope.
+#
+# Each regex is matched with Python's re.match (anchored at the start) against both the table's
+# full table id (for example "analytics:finance.orders") and its MCON. A table is in scope when
+# "include" matches either one and "exclude" matches neither.
+#
+# Use single quotes around regexes so backslashes need no escaping.
+monitors:
+  # Every table in one schema.
+  - name: "Example finance job monitor"
+    include: '^analytics:finance\.'
+
+  # Key assets in a schema, minus scratch tables. Reading only the listed schemas is faster on
+  # large warehouses; list every (database, schema) pair that can hold a matching table.
+  - name: "Example marketing job monitor"
+    include: '^analytics:marketing\.'
+    exclude: '^analytics:marketing\.(tmp|scratch)_'
+    key_assets_only: true
+    schemas:
+      - database: analytics
+        schema: marketing
+
+  # A few named tables across two schemas.
+  - name: "Example executive reporting job monitor"
+    include: '^analytics:(sales\.daily_revenue|finance\.monthly_close)$'
+    schemas:
+      - database: analytics
+        schema: sales
+      - database: analytics
+        schema: finance

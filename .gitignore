@@ -38,3 +38,7 @@ terraform.rc
 /.venv/
 
 .terraform.lock.hcl
+
+# Python
+__pycache__/
+.pytest_cache/

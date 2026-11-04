@@ -128,7 +128,16 @@ to `s3://mcd-public-resources` (requires review, linting, validation, and approv
 | Monte Carlo's agent module for customer-hosted deployments in Azure | https://github.com/monte-carlo-data/terraform-azurerm-mcd-agent |
 
 ## Scripts
-The scripts that live here are scripts that are meant to interact with external resources (e.g. Databricks) that will connect with Monte Carlo, but not with Monte Carlo directly.
+The scripts that live here are meant to be run by customers, either against external resources (e.g. Databricks) that will connect with Monte Carlo, or against the Monte Carlo API to maintain their configuration.
+
+### Job Monitors
+
+#### <ins>Job Monitor Table Sync ([source](scripts/job_monitors))</ins>
+
+After the migration from notification rules to job monitors, these scripts keep a job monitor's table list in sync
+with the legacy rule filters a job monitor can't express: key assets (`sync_key_asset_tables.py`) or a table-name
+regex (`sync_pattern_tables.py`). Run daily. See the [README](scripts/job_monitors/README.md) for setup and
+configuration.
 
 ### Databricks
 
