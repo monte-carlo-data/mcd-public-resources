@@ -30,6 +30,18 @@ jobs:
             terraform fmt -recursive -check -diff
             terraform validate
 
+  job-monitor-scripts-test:
+    docker:
+      - image: cimg/python:3.10
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r scripts/job_monitors/requirements-dev.txt
+      - run:
+          name: Run tests
+          command: pytest scripts/job_monitors
+
 workflows:
   version: 2
 
@@ -37,6 +49,7 @@ workflows:
     jobs:
       - cloudformation-lint
       - terraform-lint
+      - job-monitor-scripts-test
       - aws-s3/sync:
           name: publish-resources-dev
           auth:

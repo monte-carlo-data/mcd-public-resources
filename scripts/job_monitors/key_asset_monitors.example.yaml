@@ -1,0 +1,5 @@
+# Job monitors whose table list should be every live key asset on the monitor's warehouse.
+# Names must match each job monitor's `name` in Monte Carlo exactly (not its description).
+monitors:
+  - "example-dbt-job-monitor"
+  - "another-example-dbt-job-monitor"
